@@ -9,7 +9,6 @@ repository = "https://github.com/gi-dellav/otter"
 
 [dependencies]
 clap = { version = "4.6.6", features = ["derive"] }
-rquickjs = { version = "0.12.2", features = ["parallel", "bindgen"] }
+rquickjs = { version = "0.12.2", features = ["parallel"] }
 crossbeam-channel = "0.5"
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
