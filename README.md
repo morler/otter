@@ -58,6 +58,11 @@ echo '{"jsonrpc":"2.0","id":4,"method":"shutdown"}' | nc 127.0.0.1 9000
 Each request carries a numeric/string `id` and receives a matching response;
 notifications (no `id`) get none, per the JSON-RPC 2.0 spec.
 
+**The control port has no login.** Anyone who can connect to it can start,
+kill and message any process. It listens on `127.0.0.1` by default; a
+non-loopback `--rpc-host` prints a warning at startup. Each request line is
+limited to 1 MiB, and a connection that sends nothing for 60 seconds is closed.
+
 ## JS API
 
 | API | Description |

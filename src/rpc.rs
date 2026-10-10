@@ -16,7 +16,7 @@
 //! numeric/string `id` and receive a matching response; notifications (no
 //! `id`) get none, per the JSON-RPC 2.0 spec.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -25,6 +25,13 @@ use serde_json::{json, Value};
 
 use crate::process::Sandbox;
 use crate::scheduler::World;
+/// Longest request line accepted. A longer line gets an error and the
+/// connection is closed, so one client cannot make the server buffer without
+/// bound.
+const MAX_LINE: u64 = 1 << 20;
+/// A connection that sends nothing for this long is closed, so idle clients
+/// cannot hold connection slots forever.
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Bind the control listener. `port == 0` asks the OS for an ephemeral port.
 pub fn bind(host: &str, port: u16) -> std::io::Result<TcpListener> {
@@ -70,22 +77,29 @@ pub fn serve_loop(listener: TcpListener, world: Arc<World>, shutdown: Arc<Atomic
             }
             Err(e) => {
                 eprintln!("otter: rpc accept error: {e}");
-                return;
+                // Keep serving: one failed accept (such as EMFILE under load)
+                // must not stop the control server.
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
     }
 }
 
 fn handle_conn(mut stream: TcpStream, world: &Arc<World>, shutdown: &Arc<AtomicBool>) {
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3600)));
+    let _ = stream.set_read_timeout(Some(IDLE_TIMEOUT));
     let mut reader = BufReader::new(stream.try_clone().expect("dup stream"));
     let mut line = String::new();
     loop {
         line.clear();
-        match reader.read_line(&mut line) {
+        match (&mut reader).take(MAX_LINE).read_line(&mut line) {
             Ok(0) => return, // client closed
             Ok(_) => {}
             Err(_) => return,
+        }
+        if !line.ends_with('\n') && line.len() as u64 >= MAX_LINE {
+            let resp = json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32600, "message": "request too large" } });
+            let _ = write_all_json(&mut stream, &resp);
+            return;
         }
         let req: Value = match serde_json::from_str(line.trim()) {
             Ok(v) => v,
@@ -104,7 +118,7 @@ fn handle_conn(mut stream: TcpStream, world: &Arc<World>, shutdown: &Arc<AtomicB
         let params = req.get("params").cloned().unwrap_or(json!({}));
         let resp = dispatch(method, &params, world, shutdown);
         if !is_notification {
-            let _ = write_all_json(&mut stream, &resolve(&req, id, resp));
+            let _ = write_all_json(&mut stream, &resolve(id, resp));
         }
         if method == "shutdown" {
             return;
@@ -177,7 +191,7 @@ fn dispatch(
     }
 }
 
-fn resolve(_req: &Value, id: Value, resp: Result<Value, Value>) -> Value {
+fn resolve(id: Value, resp: Result<Value, Value>) -> Value {
     match resp {
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
         Err(error) => json!({ "jsonrpc": "2.0", "id": id, "error": error }),

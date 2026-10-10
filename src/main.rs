@@ -86,6 +86,12 @@ fn main() {
     let rpc_shutdown = Arc::new(AtomicBool::new(false));
     let rpc_handle = match args.rpc_port {
         Some(port) => {
+            if !matches!(args.rpc_host.as_str(), "127.0.0.1" | "localhost" | "::1") {
+                eprintln!(
+                    "otter: warning: the RPC port has no login; anyone who can reach {}:{port} can start and kill processes",
+                    args.rpc_host
+                );
+            }
             match otter_rt::rpc::bind(&args.rpc_host, port) {
                 Ok(listener) => {
                     let w = world.clone();

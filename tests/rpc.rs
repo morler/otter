@@ -290,3 +290,29 @@ fn rpc_idle_client_does_not_block_other_clients() {
 
     teardown(h);
 }
+
+#[test]
+fn rpc_oversized_line_gets_an_error_and_server_survives() {
+    let h = start_harness();
+
+    // One line longer than the limit, with no newline. The server must answer
+    // with an error and close, instead of buffering the whole line.
+    let addr = SocketAddr::new("127.0.0.1".parse().unwrap(), h.port);
+    let sock = TcpStream::connect(addr).expect("connect to rpc server");
+    let _ = sock.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut writer = sock.try_clone().unwrap();
+    let sender = std::thread::spawn(move || {
+        // The server may close the connection before every byte is written.
+        let _ = writer.write_all(&vec![b'a'; 2 << 20]);
+    });
+    let mut line = String::new();
+    BufReader::new(sock).read_line(&mut line).unwrap();
+    assert!(line.contains("request too large"), "unexpected reply: {line}");
+    let _ = sender.join();
+
+    // Other clients are unaffected.
+    let resp = request_rpc(h.port, "count", json!({}));
+    assert_eq!(resp.get("result").unwrap().as_u64().unwrap(), 0);
+
+    teardown(h);
+}
