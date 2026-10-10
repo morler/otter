@@ -8,7 +8,7 @@ fn run_otter(test: &str, source: &str) -> Output {
     std::fs::create_dir_all(&dir).unwrap();
     let script = dir.join("script.js");
     std::fs::write(&script, source).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_otter-rt")).arg(&script).output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_otter")).arg(&script).output().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     out
 }
@@ -21,7 +21,7 @@ fn syntax_error_makes_exit_code_non_zero() {
 
 #[test]
 fn missing_script_makes_exit_code_non_zero() {
-    let out = Command::new(env!("CARGO_BIN_EXE_otter-rt"))
+    let out = Command::new(env!("CARGO_BIN_EXE_otter"))
         .arg("/nonexistent/otter-missing.js")
         .output()
         .unwrap();
