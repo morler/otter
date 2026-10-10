@@ -171,6 +171,20 @@ pub fn create_process(
     setup.map(|()| Process { rt, ctx, shared })
 }
 
+/// Only one suspension may be outstanding per process. A second `recv()`,
+/// `sleep()` or `yieldNow()` would overwrite the first one's resolver, and that
+/// promise would never settle.
+fn ensure_not_suspended(cx: &Ctx<'_>) -> rquickjs::Result<()> {
+    let globals = cx.globals();
+    for slot in ["__otter_recv_resolve", "__otter_sleep_resolve", "__otter_yield_resolve"] {
+        let pending: Option<Function> = globals.get(slot)?;
+        if pending.is_some() {
+            return Err(js_type_error(cx, "a recv(), sleep() or yieldNow() is already pending"));
+        }
+    }
+    Ok(())
+}
+
 fn setup_globals<'js>(
     cx: &Ctx<'js>,
     world: &Arc<World>,
@@ -244,14 +258,7 @@ fn setup_globals<'js>(
         Function::new(
             cx.clone(),
             move |cx: Ctx<'js>, timeout_ms: Opt<f64>| -> rquickjs::Result<Promise<'js>> {
-                // At most one outstanding suspension per process.
-                let pending_sleep: Option<Function> = cx.globals().get("__otter_sleep_resolve")?;
-                if pending_sleep.is_some() {
-                    return Err(js_type_error(
-                        &cx,
-                        "cannot call recv() while a sleep() is pending",
-                    ));
-                }
+                ensure_not_suspended(&cx)?;
                 let (promise, resolve, reject) = Promise::new(&cx)?;
                 match s.inbox_rx.lock().unwrap().try_recv() {
                     Ok(json) => {
@@ -288,14 +295,7 @@ fn setup_globals<'js>(
         Function::new(
             cx.clone(),
             move |cx: Ctx<'js>, ms: f64| -> rquickjs::Result<Promise<'js>> {
-                // At most one outstanding suspension per process.
-                let pending_recv: Option<Function> = cx.globals().get("__otter_recv_resolve")?;
-                if pending_recv.is_some() {
-                    return Err(js_type_error(
-                        &cx,
-                        "cannot call sleep() while a recv() is pending",
-                    ));
-                }
+                ensure_not_suspended(&cx)?;
                 let (promise, resolve, _reject) = Promise::new(&cx)?;
                 let ms = if ms.is_finite() { ms.max(0.0) } else { 0.0 };
                 cx.globals().set("__otter_sleep_resolve", resolve)?;
@@ -315,6 +315,7 @@ fn setup_globals<'js>(
         Function::new(
             cx.clone(),
             move |cx: Ctx<'js>| -> rquickjs::Result<Promise<'js>> {
+                ensure_not_suspended(&cx)?;
                 let (promise, resolve, _reject) = Promise::new(&cx)?;
                 cx.globals().set("__otter_yield_resolve", resolve)?;
                 s.set_status_unless_killed(Status::Yielding);
@@ -532,17 +533,21 @@ fn setup_globals<'js>(
     let log = Function::new(
         cx.clone(),
         move |cx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<()> {
-            let mut parts = Vec::with_capacity(args.0.len());
-            for v in args.0.iter() {
-                parts.push(fmt_value(&cx, v)?);
-            }
-            println!("[pid {}] {}", s.pid, parts.join(" "));
+            println!("{}", console_line(&cx, s.pid, &args)?);
+            Ok(())
+        },
+    )?;
+    let s = shared.clone();
+    let error = Function::new(
+        cx.clone(),
+        move |cx: Ctx<'js>, args: Rest<Value<'js>>| -> rquickjs::Result<()> {
+            eprintln!("{}", console_line(&cx, s.pid, &args)?);
             Ok(())
         },
     )?;
     let console = Object::new(cx.clone())?;
-    console.set("log", log.clone())?;
-    console.set("error", log)?;
+    console.set("log", log)?;
+    console.set("error", error)?;
     globals.set("console", console)?;
 
     Ok(())
@@ -559,6 +564,15 @@ fn fmt_value<'js>(cx: &Ctx<'js>, v: &Value<'js>) -> rquickjs::Result<String> {
         Some(s) => s.to_string(),
         None => Ok("undefined".to_string()),
     }
+}
+
+/// Format console arguments as one `[pid N] ...` line.
+fn console_line<'js>(cx: &Ctx<'js>, pid: Pid, args: &Rest<Value<'js>>) -> rquickjs::Result<String> {
+    let mut parts = Vec::with_capacity(args.0.len());
+    for v in args.0.iter() {
+        parts.push(fmt_value(cx, v)?);
+    }
+    Ok(format!("[pid {pid}] {}", parts.join(" ")))
 }
 
 /// Build a `{canSpawnAndKill: bool}` snapshot of a sandbox for the JS API.

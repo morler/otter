@@ -304,8 +304,8 @@ spawn or kill others for the rest of its life.
 ## Suspension rules
 
 - At most **one** outstanding suspension per process. `recv()`, `sleep()`,
-  and `yieldNow()` each suspend the process; calling `sleep()` while a
-  `recv()` is pending (or vice versa, in the same synchronous stretch)
+  and `yieldNow()` each suspend the process. Calling any of them while another
+  is still pending, even from a different async function in the same process,
   raises a `TypeError`.
 - Once a suspension has completed (resolved or rejected), the next
   suspension is fine — `await sleep(100); await recv();` is valid.

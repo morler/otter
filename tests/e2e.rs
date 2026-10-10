@@ -1154,3 +1154,161 @@ fn sandbox_inherits_through_privileged_chain() {
     let _ = world.queue_tx.send(RunItem::Stop);
     worker.join().unwrap();
 }
+
+#[test]
+fn busy_queue_does_not_starve_sleep() {
+    let world = World::new();
+    let worker = {
+        let w = world.clone();
+        std::thread::spawn(move || worker_loop(w))
+    };
+
+    // One worker and a process that never blocks. The sleeper must still wake
+    // on time; otherwise the busy loop never ends and the test times out.
+    spawn_process(
+        &world,
+        "busy.js",
+        r#"
+            const sleeper = spawn(`
+                const t0 = Date.now();
+                await sleep(20);
+                send(0, Date.now() - t0);
+            `);
+            spawn(`while (isProcessAlive(${sleeper})) await yieldNow();`);
+            const elapsed = await recv();
+            if (elapsed > 1000) throw new Error("sleep starved: " + elapsed + "ms");
+        "#,
+        Sandbox::PRIVILEGED,
+    )
+    .unwrap();
+
+    wait_for_completion(&world, Duration::from_secs(10));
+    let _ = world.queue_tx.send(RunItem::Stop);
+    worker.join().unwrap();
+}
+
+#[test]
+fn recv_timeout_of_an_earlier_wait_does_not_fire_later() {
+    let world = World::new();
+    let worker = {
+        let w = world.clone();
+        std::thread::spawn(move || worker_loop(w))
+    };
+
+    spawn_process(
+        &world,
+        "stale.js",
+        r#"
+            spawn(`
+                await sleep(20);
+                send(0, "a");
+                await sleep(300);
+                send(0, "b");
+            `);
+            // The first recv() is woken by "a" before its 200 ms deadline.
+            const a = await recv(200);
+            if (a !== "a") throw new Error("unexpected: " + a);
+            // The second recv() has no timeout; the old deadline must not reject it.
+            const b = await recv();
+            if (b !== "b") throw new Error("unexpected: " + b);
+        "#,
+        Sandbox::PRIVILEGED,
+    )
+    .unwrap();
+
+    wait_for_completion(&world, Duration::from_secs(10));
+    let _ = world.queue_tx.send(RunItem::Stop);
+    worker.join().unwrap();
+}
+
+#[test]
+fn job_queued_before_recv_runs_while_suspended() {
+    let world = World::new();
+    let worker = {
+        let w = world.clone();
+        std::thread::spawn(move || worker_loop(w))
+    };
+
+    // The async continuation is queued before recv() suspends the entry script.
+    // It must still run, or nothing ever sends the message and the test hangs.
+    spawn_process(
+        &world,
+        "job.js",
+        r#"
+            (async () => { await null; send(self(), "x"); })();
+            const m = await recv();
+            if (m !== "x") throw new Error("unexpected: " + m);
+        "#,
+        Sandbox::PRIVILEGED,
+    )
+    .unwrap();
+
+    wait_for_completion(&world, Duration::from_secs(10));
+    let _ = world.queue_tx.send(RunItem::Stop);
+    worker.join().unwrap();
+}
+
+#[test]
+fn second_suspension_while_recv_is_pending_is_type_error() {
+    let world = World::new();
+    let worker = {
+        let w = world.clone();
+        std::thread::spawn(move || worker_loop(w))
+    };
+
+    // A second recv() must be rejected, not silently replace the first one's
+    // resolver (which would leave `first` pending forever).
+    spawn_process(
+        &world,
+        "overlap.js",
+        r#"
+            const first = recv();
+            let rejected = false;
+            try {
+                recv();
+            } catch (e) {
+                rejected = e instanceof TypeError;
+            }
+            if (!rejected) throw new Error("second recv() was not rejected");
+            send(self(), "hi");
+            const m = await first;
+            if (m !== "hi") throw new Error("first recv() lost its resolver: " + m);
+        "#,
+        Sandbox::PRIVILEGED,
+    )
+    .unwrap();
+
+    wait_for_completion(&world, Duration::from_secs(10));
+    let _ = world.queue_tx.send(RunItem::Stop);
+    worker.join().unwrap();
+}
+
+#[test]
+fn job_queued_before_sleep_runs_during_the_sleep() {
+    let world = World::new();
+    let worker = {
+        let w = world.clone();
+        std::thread::spawn(move || worker_loop(w))
+    };
+
+    // The job is queued before sleep() suspends the entry script. It must run
+    // right away, so the child it spawns reports a time near t0, not after the
+    // 1000 ms sleep has ended.
+    spawn_process(
+        &world,
+        "sleep_job.js",
+        r#"
+            const t0 = Date.now();
+            (async () => { await null; spawn(`send(0, Date.now());`); })();
+            await sleep(1000);
+            const ranAt = await recv();
+            if (ranAt - t0 > 500) throw new Error("job ran only after the sleep: " + (ranAt - t0) + "ms");
+        "#,
+        Sandbox::PRIVILEGED,
+    )
+    .unwrap();
+
+    wait_for_completion(&world, Duration::from_secs(10));
+    let _ = world.queue_tx.send(RunItem::Stop);
+    worker.join().unwrap();
+}

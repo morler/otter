@@ -69,9 +69,14 @@ fn main() {
             Ok(source) => {
                 if let Err(msg) = otter_rt::scheduler::spawn_process(&world, &name, &source, Sandbox::PRIVILEGED) {
                     eprintln!("otter: failed to start {}: {msg}", path.display());
+                    // The script never ran, but it still makes the exit code non-zero.
+                    world.failed.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            Err(e) => eprintln!("otter: cannot read {}: {e}", path.display()),
+            Err(e) => {
+                eprintln!("otter: cannot read {}: {e}", path.display());
+                world.failed.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 

@@ -76,7 +76,7 @@ notifications (no `id`) get none, per the JSON-RPC 2.0 spec.
 | `setName(name)` | Rename the current process; visible in `listProcesses()`/`processInfo()`. |
 | `selfSandbox()` | Snapshot `{canSpawnAndKill}` of the current process's sandbox policy. |
 | `restrictSandbox(policy?, opts?)` | Narrow a sandbox at runtime (self by default, or `{pid}`). Monotonic/irrevocable; returns the post-state. |
-| `console.log/error` | Line-oriented output prefixed with the pid. |
+| `console.log/error` | Line-oriented output prefixed with the pid. `console.error` writes to stderr. |
 
 Scripts support top-level `await`. Full API docs live in [`docs/`](docs/README.md).
 
@@ -98,11 +98,10 @@ cargo run --release -- examples/sandbox.js           # spawn confined children, 
 - Killing is cooperative too: `killProcess()` takes effect at the target's next
   scheduling boundary, so a process stuck in a long synchronous loop won't die
   until it yields.
-- Timers are serviced by idle workers on a ~5 ms tick, so `sleep()`/`recv()`
-  deadlines are accurate to within a tick or two, not to the millisecond.
-- At most one outstanding suspension per process: calling `sleep()` while a
-  `recv()` is pending (or vice versa) raises a `TypeError`. `recv()`/`yieldNow()`
-  after a `sleep()` is fine once the sleep has completed.
+- Timers are checked on every scheduling pass, so `sleep()`/`recv()`
+  deadlines are accurate to within a tick or two (about 5 ms when idle).
+- At most one outstanding suspension per process: while a `recv()`, `sleep()`
+  or `yieldNow()` is pending, calling any of them raises a `TypeError`.
 - Messages must be JSON-serializable; functions, symbols and `undefined` are
   rejected.
 - Sandboxing is a single toggle today (`canSpawnAndKill`); it gates only `spawn`

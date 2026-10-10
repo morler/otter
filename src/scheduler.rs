@@ -136,9 +136,10 @@ pub fn spawn_process(
     let status = *boxed.shared.status.lock().unwrap();
     match status {
         // The entry script suspended before returning (e.g. top-level
-        // `await recv()` with an empty inbox, or `await sleep(...)`).
-        Status::Waiting => park(world, boxed),
-        Status::Sleeping => park_sleep(world, boxed),
+        // `await recv()` with an empty inbox, or `await sleep(...)`). Park it
+        // only when no job is left; otherwise it runs those jobs first.
+        Status::Waiting if !boxed.rt.is_job_pending() => park(world, boxed),
+        Status::Sleeping if !boxed.rt.is_job_pending() => park_sleep(world, boxed),
         _ => {
             let _ = world.queue_tx.send(RunItem::Process(boxed));
         }
@@ -263,15 +264,16 @@ pub fn set_process_name(world: &Arc<World>, pid: Pid, name: String) {
     }
 }
 
-/// Worker entry point: pull processes off the run queue until stopped. Idle
-/// workers tick once per `TIMER_TICK`, firing any timers whose deadline has
-/// passed, so sleeping processes resume even when the queue is empty.
+/// Worker entry point: pull processes off the run queue until stopped. Timers
+/// are checked on every pass, so sleeping processes resume on time even when
+/// the queue never goes idle.
 pub fn worker_loop(world: Arc<World>) {
     loop {
+        service_timers(&world);
         match world.queue_rx.recv_timeout(TIMER_TICK) {
             Ok(RunItem::Stop) => break,
             Ok(RunItem::Process(p)) => run_slice(&world, p),
-            Err(RecvTimeoutError::Timeout) => service_timers(&world),
+            Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
@@ -298,9 +300,11 @@ fn run_slice(world: &Arc<World>, p: Box<Process>) {
                     }
                 }
                 Err(TryRecvError::Empty) => {
-                    // Spurious wake; park again.
-                    park(world, p);
-                    return;
+                    // Spurious wake. Park again, unless jobs are still queued.
+                    if !p.rt.is_job_pending() {
+                        park(world, p);
+                        return;
+                    }
                 }
                 Err(TryRecvError::Disconnected) => {
                     fail(world, p, "mailbox disconnected");
@@ -314,9 +318,9 @@ fn run_slice(world: &Arc<World>, p: Box<Process>) {
                 return;
             }
         }
-        Status::Sleeping => {
-            // A sleeper is woken only by its timer; if it ever reaches a
-            // worker, park it again without running any jobs.
+        // Woken only by its timer. Reaching a worker means jobs are queued:
+        // run them, and park again once none are left.
+        Status::Sleeping if !p.rt.is_job_pending() => {
             park_sleep(world, p);
             return;
         }
@@ -338,6 +342,10 @@ fn run_slice(world: &Arc<World>, p: Box<Process>) {
     let status = *p.shared.status.lock().unwrap();
     match status {
         Status::Done | Status::Failed | Status::Killed => finish(world, p),
+        // Jobs queued before the suspension run first; the process parks later.
+        Status::Waiting | Status::Sleeping if p.rt.is_job_pending() => {
+            let _ = world.queue_tx.send(RunItem::Process(p));
+        }
         Status::Waiting => park(world, p),
         Status::Sleeping => park_sleep(world, p),
         // A process that yielded goes to the back of the run queue; its
@@ -518,7 +526,8 @@ fn service_timers(world: &Arc<World>) {
     for entry in due {
         match entry.kind {
             TimerKind::Sleep => {
-                if let Some(p) = world.sleeping.lock().unwrap().remove(&entry.pid) {
+                let p = world.sleeping.lock().unwrap().remove(&entry.pid);
+                if let Some(p) = p {
                     if wake_sleep(&p).is_ok() {
                         let _ = world.queue_tx.send(RunItem::Process(p));
                     } else {
@@ -528,9 +537,17 @@ fn service_timers(world: &Arc<World>) {
                 // Absent from the sleeping map: already finished; skip.
             }
             TimerKind::RecvTimeout => {
-                // If a message arrived first, the process is no longer parked
-                // and the entry is stale; just drop it.
-                if let Some(p) = world.parked.lock().unwrap().remove(&entry.pid) {
+                // Only the wait that registered this timer may time out. If a
+                // message woke the process and it parked again for a newer
+                // recv(), this deadline is stale and must not reject it.
+                let p = {
+                    let mut parked = world.parked.lock().unwrap();
+                    let due = parked
+                        .get(&entry.pid)
+                        .is_some_and(|p| *p.shared.deadline.lock().unwrap() == Some(entry.deadline));
+                    if due { parked.remove(&entry.pid) } else { None }
+                };
+                if let Some(p) = p {
                     if wake_timeout(&p).is_ok() {
                         let _ = world.queue_tx.send(RunItem::Process(p));
                     } else {
