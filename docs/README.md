@@ -14,7 +14,7 @@ processes.
 ## Quick links
 
 - [Project README](../README.md) — build, run, examples, limitations.
-- [Examples](../examples) — `ping_pong.js`, `ring.js`, `coop.js`, `timer.js`.
+- [Examples](../examples) — `ping_pong.js`, `ring.js`, `coop.js`, `timer.js`, `process_mgmt.js`, `sandbox.js`.
 
 ## Process model summary
 

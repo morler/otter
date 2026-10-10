@@ -65,7 +65,7 @@ fn request_rpc(port: u16, method: &str, params: Value) -> Value {
     let req = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
     let mut bytes = serde_json::to_vec(&req).unwrap();
     bytes.push(b'\n');
-    let _ = sock.write_all(&bytes).unwrap();
+    sock.write_all(&bytes).unwrap();
 
     let mut reader = BufReader::new(sock.try_clone().unwrap());
     let mut line = String::new();
@@ -80,7 +80,7 @@ fn request_raw(port: u16, raw: &str, timeout: Duration) -> std::io::Result<Strin
     let mut sock = TcpStream::connect(addr)?;
     let _ = sock.set_read_timeout(Some(timeout));
     let payload = format!("{raw}\n");
-    let _ = sock.write_all(payload.as_bytes())?;
+    sock.write_all(payload.as_bytes())?;
     let mut reader = BufReader::new(sock.try_clone().unwrap());
     let mut line = String::new();
     match reader.read_line(&mut line) {
@@ -100,7 +100,7 @@ fn wait_until(h: &Harness, timeout: Duration) {
             return;
         }
         if Instant::now() > deadline {
-            assert!(false, "processes did not finish before timeout");
+            panic!("processes did not finish before timeout");
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -141,7 +141,7 @@ fn rpc_send_wakes_parked_process_and_it_finishes() {
     // An external `send` delivers the message; the parked process wakes, runs
     // its single `recv` slice, and the entry script returns -> finished.
     let resp = request_rpc(h.port, "send", json!({ "pid": 0, "value": "wake-up" }));
-    assert_eq!(resp.get("result").unwrap().as_bool().unwrap(), true);
+    assert!(resp.get("result").unwrap().as_bool().unwrap());
 
     wait_until(&h, Duration::from_secs(5));
     teardown(h);
@@ -156,7 +156,7 @@ fn rpc_kill_reaps_a_sleeping_process() {
     assert_eq!(count.get("result").unwrap().as_u64().unwrap(), 1);
 
     let resp = request_rpc(h.port, "kill", json!({ "pid": 0 }));
-    assert_eq!(resp.get("result").unwrap().as_bool().unwrap(), true);
+    assert!(resp.get("result").unwrap().as_bool().unwrap());
 
     wait_until(&h, Duration::from_secs(5));
     teardown(h);
@@ -168,7 +168,7 @@ fn rpc_rename_is_visible_in_list() {
     let _ = request_rpc(h.port, "spawn", json!({ "name": "orig.js", "code": "await sleep(60000);" }));
 
     let resp = request_rpc(h.port, "rename", json!({ "pid": 0, "name": "renamed.js" }));
-    assert_eq!(resp.get("result").unwrap().as_bool().unwrap(), true);
+    assert!(resp.get("result").unwrap().as_bool().unwrap());
 
     let list = request_rpc(h.port, "list", json!({}));
     let arr = list.get("result").unwrap().as_array().unwrap();
@@ -184,13 +184,13 @@ fn rpc_unknown_pid_yields_null_and_false() {
 
     // info for a pid that never existed -> null result.
     let resp = request_rpc(h.port, "info", json!({ "pid": 42 }));
-    assert_eq!(resp.get("result").unwrap().as_null().is_some(), true);
+    assert!(resp.get("result").unwrap().is_null());
 
     // kill/rename for unknown -> false.
     let resp = request_rpc(h.port, "kill", json!({ "pid": 42 }));
-    assert_eq!(resp.get("result").unwrap().as_bool().unwrap(), false);
+    assert!(!resp.get("result").unwrap().as_bool().unwrap());
     let resp = request_rpc(h.port, "rename", json!({ "pid": 42, "name": "x" }));
-    assert_eq!(resp.get("result").unwrap().as_bool().unwrap(), false);
+    assert!(!resp.get("result").unwrap().as_bool().unwrap());
 
     teardown(h);
 }
@@ -252,7 +252,7 @@ fn rpc_notification_gets_no_response() {
 fn rpc_shutdown_stops_the_server() {
     let h = start_harness();
     let resp = request_rpc(h.port, "shutdown", json!({}));
-    assert_eq!(resp.get("result").unwrap().as_bool().unwrap(), true);
+    assert!(resp.get("result").unwrap().as_bool().unwrap());
 
     // The server thread returns once it observes the shutdown flag.
     let _ = h.server.join();
