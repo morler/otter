@@ -21,16 +21,22 @@ fn wait_for_completion(world: &Arc<World>, timeout: Duration) {
     assert_eq!(world.failed.load(std::sync::atomic::Ordering::Relaxed), 0);
 }
 
-#[test]
-fn two_processes_exchange_messages() {
+/// Run one script on a single worker until every process finishes.
+fn run_script(name: &str, source: &str, sandbox: Sandbox) {
     let world = World::new();
     let worker = {
         let w = world.clone();
         std::thread::spawn(move || worker_loop(w))
     };
+    spawn_process(&world, name, source, sandbox).unwrap();
+    wait_for_completion(&world, Duration::from_secs(10));
+    let _ = world.queue_tx.send(RunItem::Stop);
+    worker.join().unwrap();
+}
 
-    spawn_process(
-        &world,
+#[test]
+fn two_processes_exchange_messages() {
+    run_script(
         "a.js",
         r#"
             const b = spawn(`
@@ -42,12 +48,7 @@ fn two_processes_exchange_messages() {
             send(b, "bye");
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
@@ -89,14 +90,7 @@ fn one_worker_multiplexes_many_processes() {
 
 #[test]
 fn yield_suspends_and_resumes() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
-    spawn_process(
-        &world,
+    run_script(
         "a.js",
         r#"
             const order = [];
@@ -117,12 +111,7 @@ fn yield_suspends_and_resumes() {
             }
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
@@ -166,14 +155,7 @@ fn failing_process_does_not_stop_others() {
 
 #[test]
 fn sleep_resumes_after_delay() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
-    spawn_process(
-        &world,
+    run_script(
         "sleeper.js",
         r#"
             const t0 = Date.now();
@@ -183,50 +165,27 @@ fn sleep_resumes_after_delay() {
             if (elapsed > 1000) throw new Error("woke too late: " + elapsed + "ms");
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn top_level_await_sleep_parks_entry_script() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
     // The entry script suspends before returning; spawn_process must park it
     // in the sleeping map (not the run queue) and the timer must resume it.
-    spawn_process(
-        &world,
+    
+    run_script(
         "top.js",
         r#"
             await sleep(40);
             send(0, "done");
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn recv_timeout_rejects_with_timeout_error() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
-    spawn_process(
-        &world,
+    run_script(
         "timeout.js",
         r#"
             try {
@@ -239,24 +198,12 @@ fn recv_timeout_rejects_with_timeout_error() {
             }
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn recv_message_before_timeout() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
-    spawn_process(
-        &world,
+    run_script(
         "a.js",
         r#"
             const b = spawn(`send(0, "quick");`);
@@ -264,24 +211,12 @@ fn recv_message_before_timeout() {
             if (msg !== "quick") throw new Error("unexpected: " + msg);
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn message_that_races_a_timeout_is_still_delivered() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
-    spawn_process(
-        &world,
+    run_script(
         "a.js",
         r#"
             const b = spawn(`
@@ -300,26 +235,15 @@ fn message_that_races_a_timeout_is_still_delivered() {
             if (m !== "late") throw new Error("unexpected: " + m);
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn sleeping_process_does_not_block_others() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
     // While the sleeper is parked, pid 0 must still be able to ping-pong
     // with a third process, then receive the sleeper's wake-up message.
-    spawn_process(
-        &world,
+    
+    run_script(
         "a.js",
         r#"
             spawn(`
@@ -341,26 +265,15 @@ fn sleeping_process_does_not_block_others() {
             if (awake !== "awake") throw new Error("unexpected: " + awake);
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn sleep_then_plain_recv_has_no_stale_timeout() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
     // Regression: after a sleep wakes, a subsequent plain recv() must not
     // inherit the (stale) sleep deadline as a recv timeout.
-    spawn_process(
-        &world,
+    
+    run_script(
         "a.js",
         r#"
             await sleep(20);
@@ -369,24 +282,12 @@ fn sleep_then_plain_recv_has_no_stale_timeout() {
             if (m !== "ping") throw new Error("unexpected: " + m);
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn kill_process_reaps_parked_and_sleeping_processes() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
-    spawn_process(
-        &world,
+    run_script(
         "killer.js",
         r#"
             const parked = spawn(`await recv();`);
@@ -410,24 +311,12 @@ fn kill_process_reaps_parked_and_sleeping_processes() {
             send(parked, "hello"); // to a dead pid: dropped silently
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn kill_self_terminates_current_process() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
-    spawn_process(
-        &world,
+    run_script(
         "selfkill.js",
         r#"
             const me = self();
@@ -439,24 +328,12 @@ fn kill_self_terminates_current_process() {
             console.log("should never print");
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn kill_unknown_pid_is_false_and_info_is_null() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
-    spawn_process(
-        &world,
+    run_script(
         "info.js",
         r#"
             if (processInfo(99999) !== null) throw new Error("expected null info");
@@ -469,24 +346,12 @@ fn kill_unknown_pid_is_false_and_info_is_null() {
             }
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn set_name_updates_process_info_and_list() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
-    spawn_process(
-        &world,
+    run_script(
         "rename.js",
         r#"
             setName("renamed-self");
@@ -495,24 +360,12 @@ fn set_name_updates_process_info_and_list() {
             if (!listed || listed.name !== "renamed-self") throw new Error("list name not updated");
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn confined_child_cannot_spawn() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
-    spawn_process(
-        &world,
+    run_script(
         "parent.js",
         r#"
             // Privileged root spawns a confined child.
@@ -534,24 +387,12 @@ fn confined_child_cannot_spawn() {
             if (msg !== "blocked") throw new Error("unexpected: " + msg);
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn confined_child_cannot_kill_others() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
-    spawn_process(
-        &world,
+    run_script(
         "parent.js",
         r#"
             const victim = spawn(`await recv();`); // privileged, parks
@@ -577,24 +418,12 @@ fn confined_child_cannot_kill_others() {
             killProcess(victim); // privileged parent cleans up
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn confined_child_can_kill_self() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
-    spawn_process(
-        &world,
+    run_script(
         "parent.js",
         r#"
             const child = spawn(
@@ -611,24 +440,12 @@ fn confined_child_can_kill_self() {
             await recv();
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn selfsandbox_reports_current_policy() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
-    spawn_process(
-        &world,
+    run_script(
         "root.js",
         r#"
             if (selfSandbox().canSpawnAndKill !== true) {
@@ -646,24 +463,12 @@ fn selfsandbox_reports_current_policy() {
             if (msg !== "reported") throw new Error("unexpected: " + msg);
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn restrictsandbox_self_narrows_irrevocably() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
-    spawn_process(
-        &world,
+    run_script(
         "root.js",
         r#"
             // Privileged root self-confines, then proves it cannot escape.
@@ -690,24 +495,12 @@ fn restrictsandbox_self_narrows_irrevocably() {
             await recv();
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn restrictsandbox_cross_target_requires_privilege_and_narrows() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
-    spawn_process(
-        &world,
+    run_script(
         "root.js",
         r#"
             // A privileged child that, on request, tries to spawn and reports
@@ -776,24 +569,12 @@ fn restrictsandbox_cross_target_requires_privilege_and_narrows() {
             await recv();
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn restrictsandbox_unknown_target_is_typeerror_after_privilege() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
-    spawn_process(
-        &world,
+    run_script(
         "root.js",
         r#"
             // Privileged caller, dead target -> TypeError (bad arg).
@@ -823,26 +604,15 @@ fn restrictsandbox_unknown_target_is_typeerror_after_privilege() {
             await recv();
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn spawn_inherits_parent_sandbox_by_default() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
     // A confined root: its children inherit confinement even without an
     // explicit override (no-escalation by inheritance).
-    spawn_process(
-        &world,
+    
+    run_script(
         "confined-root.js",
         r#"
             if (selfSandbox().canSpawnAndKill !== false) throw new Error("root should be confined");
@@ -857,12 +627,7 @@ fn spawn_inherits_parent_sandbox_by_default() {
             await recv();
         "#,
         Sandbox::CONFINED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
@@ -1157,16 +922,10 @@ fn sandbox_inherits_through_privileged_chain() {
 
 #[test]
 fn busy_queue_does_not_starve_sleep() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
     // One worker and a process that never blocks. The sleeper must still wake
     // on time; otherwise the busy loop never ends and the test times out.
-    spawn_process(
-        &world,
+    
+    run_script(
         "busy.js",
         r#"
             const sleeper = spawn(`
@@ -1179,24 +938,12 @@ fn busy_queue_does_not_starve_sleep() {
             if (elapsed > 1000) throw new Error("sleep starved: " + elapsed + "ms");
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn recv_timeout_of_an_earlier_wait_does_not_fire_later() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
-    spawn_process(
-        &world,
+    run_script(
         "stale.js",
         r#"
             spawn(`
@@ -1213,26 +960,15 @@ fn recv_timeout_of_an_earlier_wait_does_not_fire_later() {
             if (b !== "b") throw new Error("unexpected: " + b);
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn job_queued_before_recv_runs_while_suspended() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
     // The async continuation is queued before recv() suspends the entry script.
     // It must still run, or nothing ever sends the message and the test hangs.
-    spawn_process(
-        &world,
+    
+    run_script(
         "job.js",
         r#"
             (async () => { await null; send(self(), "x"); })();
@@ -1240,26 +976,15 @@ fn job_queued_before_recv_runs_while_suspended() {
             if (m !== "x") throw new Error("unexpected: " + m);
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn second_suspension_while_recv_is_pending_is_type_error() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
     // A second recv() must be rejected, not silently replace the first one's
     // resolver (which would leave `first` pending forever).
-    spawn_process(
-        &world,
+    
+    run_script(
         "overlap.js",
         r#"
             const first = recv();
@@ -1275,27 +1000,16 @@ fn second_suspension_while_recv_is_pending_is_type_error() {
             if (m !== "hi") throw new Error("first recv() lost its resolver: " + m);
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }
 
 #[test]
 fn job_queued_before_sleep_runs_during_the_sleep() {
-    let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
-
     // The job is queued before sleep() suspends the entry script. It must run
     // right away, so the child it spawns reports a time near t0, not after the
     // 1000 ms sleep has ended.
-    spawn_process(
-        &world,
+    
+    run_script(
         "sleep_job.js",
         r#"
             const t0 = Date.now();
@@ -1305,10 +1019,5 @@ fn job_queued_before_sleep_runs_during_the_sleep() {
             if (ranAt - t0 > 500) throw new Error("job ran only after the sleep: " + (ranAt - t0) + "ms");
         "#,
         Sandbox::PRIVILEGED,
-    )
-    .unwrap();
-
-    wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
+    );
 }

@@ -13,7 +13,7 @@ use crate::scheduler::{self, Pid, World};
 
 /// Per-process sandbox policy: a set of on/off toggles. Toggles only ever
 /// narrow — a process can drop a permission it holds, but can never gain one
-/// it lacks (every change is an intersection). Stored on `ProcShared` and read
+/// it lacks (every change only narrows). Stored on `ProcShared` and read
 /// by the JS callbacks that gate privileged operations; the scheduler itself
 /// never consults it.
 #[derive(Clone, Copy, Debug)]
@@ -34,17 +34,6 @@ impl Sandbox {
     pub const CONFINED: Sandbox = Sandbox {
         can_spawn_and_kill: false,
     };
-
-    /// Monotonic narrowing: the result holds a toggle only if both operands
-    /// do. Used to inherit a parent's sandbox at `spawn` time and to apply a
-    /// `restrictSandbox` policy at runtime. This is what makes confinement
-    /// irrevocable in effect: intersecting with `CONFINED` can never be undone
-    /// by a later intersect.
-    pub fn intersect(self, other: Sandbox) -> Sandbox {
-        Sandbox {
-            can_spawn_and_kill: self.can_spawn_and_kill && other.can_spawn_and_kill,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,8 +179,17 @@ fn setup_globals<'js>(
     world: &Arc<World>,
     shared: &Arc<ProcShared>,
 ) -> rquickjs::Result<()> {
-    let globals = cx.globals();
+    install_error_classes(cx)?;
+    install_messaging(cx, world, shared)?;
+    install_process_control(cx, world, shared)?;
+    install_sandbox_api(cx, world, shared)?;
+    install_process_table(cx, world, shared)?;
+    install_lifecycle_and_console(cx, shared)?;
+    Ok(())
+}
 
+/// Error classes every process gets (`TimeoutError`, `PermissionError`).
+fn install_error_classes<'js>(cx: &Ctx<'js>) -> rquickjs::Result<()> {
     // Distinguishable error type for `recv(timeoutMs)` timeouts.
     cx.eval::<(), _>(
         "var TimeoutError = class extends Error { constructor(msg) { super(msg); this.name = 'TimeoutError'; } };",
@@ -202,6 +200,17 @@ fn setup_globals<'js>(
     cx.eval::<(), _>(
         "var PermissionError = class extends Error { constructor(msg) { super(msg); this.name = 'PermissionError'; } };",
     )?;
+
+    Ok(())
+}
+
+/// Spawning, messages, suspension (`recv`, `sleep`, `yieldNow`) and `self`.
+fn install_messaging<'js>(
+    cx: &Ctx<'js>,
+    world: &Arc<World>,
+    shared: &Arc<ProcShared>,
+) -> rquickjs::Result<()> {
+    let globals = cx.globals();
 
     let w = world.clone();
     let s = shared.clone();
@@ -327,6 +336,17 @@ fn setup_globals<'js>(
     let s = shared.clone();
     globals.set("self", Function::new(cx.clone(), move || -> u64 { s.pid })?)?;
 
+    Ok(())
+}
+
+/// Killing processes.
+fn install_process_control<'js>(
+    cx: &Ctx<'js>,
+    world: &Arc<World>,
+    shared: &Arc<ProcShared>,
+) -> rquickjs::Result<()> {
+    let globals = cx.globals();
+
     let s = shared.clone();
     let w = world.clone();
     globals.set(
@@ -349,6 +369,17 @@ fn setup_globals<'js>(
             },
         )?,
     )?;
+
+    Ok(())
+}
+
+/// Sandbox inspection and narrowing.
+fn install_sandbox_api<'js>(
+    cx: &Ctx<'js>,
+    world: &Arc<World>,
+    shared: &Arc<ProcShared>,
+) -> rquickjs::Result<()> {
+    let globals = cx.globals();
 
     // Snapshot the current process's own sandbox as `{canSpawnAndKill: bool}`.
     // The only way to read a sandbox across the JS API; capability info is not
@@ -498,6 +529,17 @@ fn setup_globals<'js>(
         })?,
     )?;
 
+    Ok(())
+}
+
+/// Process table queries and renaming.
+fn install_process_table<'js>(
+    cx: &Ctx<'js>,
+    world: &Arc<World>,
+    shared: &Arc<ProcShared>,
+) -> rquickjs::Result<()> {
+    let globals = cx.globals();
+
     let w = world.clone();
     let s = shared.clone();
     globals.set(
@@ -506,6 +548,16 @@ fn setup_globals<'js>(
             scheduler::set_process_name(&w, s.pid, name);
         })?,
     )?;
+
+    Ok(())
+}
+
+/// Lifecycle callbacks and `console`.
+fn install_lifecycle_and_console<'js>(
+    cx: &Ctx<'js>,
+    shared: &Arc<ProcShared>,
+) -> rquickjs::Result<()> {
+    let globals = cx.globals();
 
     let s = shared.clone();
     globals.set(

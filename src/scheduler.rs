@@ -109,7 +109,7 @@ impl World {
 /// `sandbox` argument fixes the new process's initial sandbox; callers are
 /// responsible for narrowing it relative to the parent. The `spawn` JS
 /// callback does this by starting from the parent's sandbox and turning off
-/// the toggles the caller explicitly requested (a monotonic narrowing —/// see `Sandbox::intersect` for the conceptual model).
+/// the toggles the caller explicitly requested (a monotonic narrowing).
 pub fn spawn_process(
     world: &Arc<World>,
     name: &str,
@@ -313,7 +313,7 @@ fn run_slice(world: &Arc<World>, p: Box<Process>) {
             }
         }
         Status::Yielding => {
-            if wake_yield(&p).is_err() {
+            if wake_unit(&p, "__otter_yield_resolve").is_err() {
                 fail(world, p, "failed to resume after yield");
                 return;
             }
@@ -382,17 +382,20 @@ fn wake_with(p: &Process, json: String) -> rquickjs::Result<()> {
     })
 }
 
-/// Resume a process that yielded: fire the stashed `yieldNow()` resolver so
-/// the suspended continuation becomes a pending job.
-fn wake_yield(p: &Process) -> rquickjs::Result<()> {
+/// Resume a process whose `sleep()` or `yieldNow()` finished: resolve the promise
+/// stashed under `slot` so the suspended continuation becomes a pending job.
+fn wake_unit(p: &Process, slot: &str) -> rquickjs::Result<()> {
     p.ctx.with(|cx| {
         let globals = cx.globals();
-        let resolve: Option<Function> = globals.get("__otter_yield_resolve")?;
+        let resolve: Option<Function> = globals.get(slot)?;
         if let Some(resolve) = resolve {
             resolve.call::<_, ()>(())?;
-            globals.set("__otter_yield_resolve", ())?;
+            globals.set(slot, ())?;
         }
         p.shared.set_status_unless_killed(Status::Running);
+        // Clear the consumed deadline so a later plain `recv()` doesn't pick
+        // it up as a stale timeout.
+        *p.shared.deadline.lock().unwrap() = None;
         Ok(())
     })
 }
@@ -470,24 +473,6 @@ fn park_sleep(world: &Arc<World>, p: Box<Process>) {
     }
 }
 
-/// Resolve the stashed `sleep()` resolver so the suspended continuation
-/// becomes a pending job.
-fn wake_sleep(p: &Process) -> rquickjs::Result<()> {
-    p.ctx.with(|cx| {
-        let globals = cx.globals();
-        let resolve: Option<Function> = globals.get("__otter_sleep_resolve")?;
-        if let Some(resolve) = resolve {
-            resolve.call::<_, ()>(())?;
-            globals.set("__otter_sleep_resolve", ())?;
-        }
-        p.shared.set_status_unless_killed(Status::Running);
-        // Clear the consumed deadline so a later plain `recv()` doesn't pick
-        // it up as a stale timeout.
-        *p.shared.deadline.lock().unwrap() = None;
-        Ok(())
-    })
-}
-
 /// Reject the stashed `recv(timeout)` resolver with a `TimeoutError` so the
 /// suspended continuation throws inside the awaiting async function.
 fn wake_timeout(p: &Process) -> rquickjs::Result<()> {
@@ -528,7 +513,7 @@ fn service_timers(world: &Arc<World>) {
             TimerKind::Sleep => {
                 let p = world.sleeping.lock().unwrap().remove(&entry.pid);
                 if let Some(p) = p {
-                    if wake_sleep(&p).is_ok() {
+                    if wake_unit(&p, "__otter_sleep_resolve").is_ok() {
                         let _ = world.queue_tx.send(RunItem::Process(p));
                     } else {
                         fail(world, p, "failed to resume after sleep");
