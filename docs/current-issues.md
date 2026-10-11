@@ -4,23 +4,24 @@
 
 ## P0 — 立即处理
 
-- [ ] **未经认证的 RPC 暴露特权操作**（安全，高）：`src/main.rs` 非 loopback 监听允许远程 spawn/kill/send/shutdown。拒绝非 loopback 默认配置，除非增加明确安全机制。
+- [x] **未经认证的 RPC 暴露特权操作**（安全，高）：`src/main.rs` 默认拒绝非 loopback RPC 监听。
 
-- [x] **未经认证的 RPC 暴露特权操作**：`src/main.rs` 现在拒绝非 loopback RPC；已通过 `cargo test`。
 
 ## P1 — 进程生命周期、并发与服务健壮性
 
-- [ ] `src/main.rs` 先停 worker 后 join RPC，造成关停竞态；需先停 RPC 接入/请求再停 worker。
-- [ ] `src/scheduler.rs` `fail` 可覆盖 `Killed`；保持 kill 优先级。
-- [ ] `src/scheduler.rs` 创建进程对外可见早于 `active` 计数；协调注册、计数与失败回滚。
-- [ ] `src/scheduler.rs` 队列发送失败会丢弃进程；统一确保失败队列项被回收。
-- [ ] `src/process.rs` 初始化/脚本执行失败时残留注册表条目。
-- [ ] `src/process.rs` 超大 `recv(timeoutMs)` 可使 `Instant` 加法溢出 panic。
-- [ ] `src/process.rs` 错误类名插入 JS 源码，需白名单/安全构造。
-- [ ] `src/rpc.rs` 无写超时、线程创建 panic；连接可耗尽线程池，资源失败可终止服务。
-- [ ] `src/rpc.rs` JSON-RPC 请求校验宽松；非法请求应返回 `-32600`。
-- [ ] `src/rpc.rs` rename 的存活检查与改名有竞态，需原子 API。
-- [ ] `src/main.rs` worker/RPC 线程创建失败使用 `expect`，需受控清理与退出。
+- [x] `src/main.rs` 先停止并 join RPC，再停止并 join workers，避免关停期间 RPC 请求遗留进程。
+- [x] `src/scheduler.rs` kill 保持终态优先级，`fail` 不覆盖 `Killed`。
+- [x] `src/scheduler.rs` 进程创建记账与注册失败回滚协调，避免 active 计数丢失/重复。
+- [x] `src/scheduler.rs` 队列发送失败时回收无法重新入队的进程。
+- [x] `src/process.rs` 初始化失败移除注册，并回滚 active 记账。
+- [x] `src/process.rs` `recv(timeoutMs)` deadline 有界构造，避免超大值触发 `Instant` 溢出。
+- [x] `src/process.rs` 错误类名通过固定白名单选择，不接受动态源码注入。
+- [x] `src/rpc.rs` 限制连接数量和读写时长；线程创建/套接字配置错误受控处理，关停时关闭并 join handlers。
+- [x] `src/rpc.rs` 校验 JSON-RPC envelope，非法请求返回 `-32600`；无效 ID 的错误响应使用 `null`。
+- [x] `src/scheduler.rs` 提供原子 `rename_if_alive`，RPC 不再 check-then-act。
+- [x] `src/main.rs` worker/RPC 线程创建失败会报告并清理已启动 worker。
+
+修复提交：`7f62860`、`46b1a28`、`5768a79`。验证：`cargo test`（52 项）、`cargo clippy --all-targets`、`cargo fmt --check`。
 
 ## P2 — 示例与测试可靠性
 
