@@ -321,7 +321,9 @@ fn install_messaging<'js>(
             move |cx: Ctx<'js>, timeout_ms: Opt<f64>| -> rquickjs::Result<Promise<'js>> {
                 ensure_not_suspended(&cx)?;
                 let (promise, resolve, reject) = Promise::new(&cx)?;
-                match s.inbox_rx.lock().unwrap().try_recv() {
+                // Release the lock before resolving: resolving can re-enter recv().
+                let next = s.inbox_rx.lock().unwrap().try_recv();
+                match next {
                     Ok(json) => {
                         let v: Value = cx.json_parse(json)?;
                         resolve.call::<_, ()>((v,))?;

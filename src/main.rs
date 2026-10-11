@@ -117,7 +117,7 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("otter: cannot bind RPC on {}:{port}: {e}", args.rpc_host);
-                    None
+                    std::process::exit(1);
                 }
             }
         }

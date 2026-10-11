@@ -25,9 +25,9 @@
 修复提交：`7f62860`、`46b1a28`、`5768a79`。验证：`cargo test`（52 项）、`cargo clippy --all-targets`、`cargo fmt --check`。
 
 - [ ] **spawn 权限快照过早**（安全，高，已核实 `src/process.rs:238-250`）：`opts` 的 getter 能运行用户 JS 并收窄自身权限，随后仍按旧快照派生特权子进程。修法：解析 `opts` 之后重新读取并检查。
-- [ ] **recv 持锁跨越 resolve**（中，已核实 `src/process.rs:287`）：`match` 的守卫持有到分支结束；JSON 对象的 `then` getter 同步执行，可在守卫内重入 `recv` 导致 worker 死锁，殃及同 worker 的其他进程。修法：先取出结果、释放守卫，再 resolve。
+- [x] **recv 持锁跨越 resolve**（中，已核实 `src/process.rs:287`；已修复：复现脚本修复前挂死（超时 124），修复后单 worker 下同 worker 进程仍可运行）：`match` 的守卫持有到分支结束；JSON 对象的 `then` getter 同步执行，可在守卫内重入 `recv` 导致 worker 死锁，殃及同 worker 的其他进程。修法：先取出结果、释放守卫，再 resolve。
 - [ ] **RPC 慢速客户端占线程**（高，已核实 `src/rpc.rs:130`）：`read_timeout` 按单次读计，客户端每 59 秒送 1 字节即可长期占线程。修法：为整行读取设总截止时间。
-- [ ] **RPC 绑定失败仍以 0 退出**（中，已核实 `src/main.rs:115-119`）：绑定失败只打印，进程按“未请求 RPC”继续。修法：绑定失败时以退出码 1 结束。
+- [x] **RPC 绑定失败仍以 0 退出**（中，已核实 `src/main.rs:115-119`；已修复：占用端口时退出码由 0 变为 1）：绑定失败只打印，进程按“未请求 RPC”继续。修法：绑定失败时以退出码 1 结束。
 - [x] **单个 job 无中断（已实现可选上限）**：`--max-job-ms MS`，默认关闭。超限即让进程失败；实测 `try/catch` 无法捕获该中断。`tests/e2e.rs::job_over_budget_fails_the_process` 覆盖 `run_slice` 路径；创建时入口脚本路径仅手测（无自动化测试）。
 - [ ] **ERROR_DESCRIBER 可抛错**（高，结构确认，未实测，`src/process.rs:152-155`）：`String(e)` 或 `e.stack` 抛错时 `__otter_error` 不会被调用，进程可能停在非终态。修法：描述函数包 try/catch，兜底返回固定文本。
 - [ ] **投递与超时竞态**（中，已核实逻辑，`src/scheduler.rs:185-197`、`:579`）：消息在截止前入箱，但投递线程在取 `parked` 锁前被挂起，timer 先超时。消息不丢、仍留在 inbox，但本次 `recv` 误报超时。修法待定。
