@@ -1,10 +1,11 @@
 # 当前问题列表（OCR）
 
-来源：2025-? OCR 全仓扫描（18 个文件，42 条评论）；扫描中一次路径检索因正则错误失败（`processCount|listProcesses|recv()|send(`），因此本清单只覆盖报告明确列出的发现，尚未是完整审计。缺口与补扫计划见文末“未覆盖范围”。
+来源：2025-? OCR 全仓扫描（18 个文件，42 条评论）。补扫（会话 `2fa66585`，42 条）已完成，结论与待决策项见文末“补扫分诊”。
 
 ## P0 — 立即处理
 
 - [x] **未经认证的 RPC 暴露特权操作**（安全，高）：`src/main.rs` 默认拒绝非 loopback RPC 监听。
+- [ ] **loopback 下仍无认证**（安全，critical，补扫 `src/rpc.rs:39`）：本机任何进程可连 RPC 并 `spawn` `PRIVILEGED`。**待决策**：① 增加令牌认证；② 收窄为只读；③ 文档化为本机信任模型。
 
 
 ## P1 — 进程生命周期、并发与服务健壮性
@@ -23,6 +24,16 @@
 
 修复提交：`7f62860`、`46b1a28`、`5768a79`。验证：`cargo test`（52 项）、`cargo clippy --all-targets`、`cargo fmt --check`。
 
+- [ ] **spawn 权限快照过早**（安全，高，已核实 `src/process.rs:238-250`）：`opts` 的 getter 能运行用户 JS 并收窄自身权限，随后仍按旧快照派生特权子进程。修法：解析 `opts` 之后重新读取并检查。
+- [ ] **recv 持锁跨越 resolve**（中，已核实 `src/process.rs:287`）：`match` 的守卫持有到分支结束；JSON 对象的 `then` getter 同步执行，可在守卫内重入 `recv` 导致 worker 死锁，殃及同 worker 的其他进程。修法：先取出结果、释放守卫，再 resolve。
+- [ ] **RPC 慢速客户端占线程**（高，已核实 `src/rpc.rs:130`）：`read_timeout` 按单次读计，客户端每 59 秒送 1 字节即可长期占线程。修法：为整行读取设总截止时间。
+- [ ] **RPC 绑定失败仍以 0 退出**（中，已核实 `src/main.rs:115-119`）：绑定失败只打印，进程按“未请求 RPC”继续。修法：绑定失败时以退出码 1 结束。
+- [ ] **单个 job 无中断**（高，已核实：全仓无 interrupt 设置）：`while(true){}` 永久占住一个 worker，数个这样的进程即可冻结运行时。**待决策**：加时间片上限（`set_interrupt_handler`），还是保持不可中断并文档化。
+- [ ] **ERROR_DESCRIBER 可抛错**（高，结构确认，未实测，`src/process.rs:152-155`）：`String(e)` 或 `e.stack` 抛错时 `__otter_error` 不会被调用，进程可能停在非终态。修法：描述函数包 try/catch，兜底返回固定文本。
+- [ ] **投递与超时竞态**（中，已核实逻辑，`src/scheduler.rs:185-197`、`:579`）：消息在截止前入箱，但投递线程在取 `parked` 锁前被挂起，timer 先超时。消息不丢、仍留在 inbox，但本次 `recv` 误报超时。修法待定。
+- [ ] **main 等待循环不监视线程死亡**（中，待核实，`src/main.rs:124-141`）：持久模式下 RPC 线程若崩溃，进程可能永久挂起。
+- [ ] **关停阻塞顺序**（中，待核实，`src/main.rs:142-144`）：RPC join 先于 worker 停止；RPC 线程若被阻塞，关停无限期等待。
+
 ## P2 — 示例与测试可靠性
 
 - [ ] `examples/ping_pong.js`：未改。`send` 不返回失败（docs/api.md：发往已结束 pid 静默丢弃），`recv()` 仅在收到 `null` 消息时返回 `null`，协议中父进程从不发送 `null` 给子进程，因此扫描结论不成立。
@@ -33,11 +44,18 @@
 - [x] `tests/cli.rs` 唯一临时目录 + `Drop` 清理；stderr 断言不得包含 stdout 文本（提交 0a36133）。
 - [x] `tests/e2e.rs` worker 断言失败时仍停止并 join（提交 0a36133）；“let it park”固定延时删除（spawn 同步挂起）；kill/自杀回收改为 2 秒有界轮询；唤醒上限放宽为 10 秒。未改：`busy_queue_does_not_starve_sleep` 的 1 秒饥饿阈值仍是 wall-clock 断言。验证：串行 15 次与 4 路并发 ×5 轮全部通过。
 - [x] `tests/rpc.rs` EOF 作为错误报告；通知测试只接受读超时；teardown 前关闭闲置客户端（提交 0a36133）。
+- [ ] **测试失败路径清理**（补扫，中）：`tests/e2e.rs:78-81` 工作线程仅在成功路径停止，应统一用 `WorkerGuard`；`tests/e2e.rs:44-46` 丢弃 join 结果；`:45` 无界 join 可能绕过完成超时。`tests/rpc.rs:17-19` 失败路径不清理，`:53-55` 丢弃 join 结果，`:357-358` join 无期限。
+- [ ] **测试断言过宽**（补扫，中）：`tests/rpc.rs:364-367` 任何 `request_raw` 错误都满足断言；`:82` 不校验 JSON-RPC envelope；`tests/cli.rs:43`、`:49` 负向测试接受信号/abort，且缺失路径可能真实存在。
+- [ ] **示例缺失路径**（补扫，中）：`examples/process_mgmt.js:10` worker 创建与 ack 无失败路径；`examples/ring.js:22` 超时只覆盖根 recv；`examples/timer.js:5` 两个 pid 未使用。
+- [ ] **e2e 时序假设与命名**（补扫，中）：`tests/e2e.rs:245`、`:283`、`:349`、`:537` 依赖 wall-clock 或后续动作；`:639`、`:752` 测试名与内容不符（未观察子进程的 sandbox）。
 
 ## P3 — 维护债务与配置缺口
 
 - [x] `Cargo.toml` 声明 Rust 1.85 MSRV（与 edition 2024 对齐）。
 - [x] `.gitignore` 已只保留 `/target`，无过宽 `debug` 规则。`jevmem.config.json` / `JEVMEM.md` 故意不入库：本地工具配置，仓库内无代码或文档读取它（提交 51c01fb）。
+- [ ] **已知权衡待注释**（补扫，低）：`src/scheduler.rs:475` 的 `recv(timeout)` 定时器不随消息取消（惰性删除，`CLAUDE.md` 已说明），需补 `shortcut:` 注释，说明何时改为可删除的堆。
+- [ ] `src/rpc.rs:164`：接受数组 `params`，但所有方法都不使用（低）。
+- [ ] `src/main.rs:66`：入口脚本先于 RPC 监听启动（待核实，设计取舍，低）。
 
 ## 修复记录
 
@@ -50,8 +68,9 @@ P0 为可远程执行任意代码的安全边界；P1 为进程可能永久悬�
 
 > OCR 建议需结合 API 与实现验证；尤其“send 失败”“邮箱关闭”等结论不能仅凭扫描文本直接采纳。
 
-## 未覆盖范围（待补扫）
+## 补扫分诊（会话 `2fa66585`，42 条）
 
-- [ ] **缺口：** 扫描中 `processCount|listProcesses|recv()|send(` 的 Perl 正则未能执行（`recv()` 括号未闭合），因此对这些 API 调用点的审查没有完成。
-- [ ] **计划：** 运行一次新的 `ocr_scan`（全仓，`timeout_sec` 1200）；把结果中新增且未在本清单的发现追加到对应优先级，并记录扫描会话 ID。
-- [ ] **结果：** 待扫描完成后回填。
+- **→ 结论：** 补扫已完成。17 个文件（其中 6 个复用既有结果），42 条评论，已全部归入上方 P0–P3。会话 `2d62b71e` 已中止（7 个文件、8 条），未采用。
+- **→ 原扫描缺口：** 正则检索 `processCount|listProcesses|recv()|send(` 失败；补扫为文件级审阅，已覆盖这些调用点所在的文件。
+- **→ 不改（设计如此）：** `send` 对死 pid 返回 `true`（`docs/api.md` 定义为静默丢弃）；定时器惰性删除（`CLAUDE.md` 已说明的权衡）。
+- **→ 需要你决策：** ① loopback RPC 的认证方式（P0）；② 单 job 无中断是否加时间片（P1）。
