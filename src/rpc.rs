@@ -190,8 +190,7 @@ fn dispatch(
                 .and_then(Value::as_u64)
                 .unwrap_or(u64::MAX);
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-            if crate::scheduler::is_process_alive(world, pid) {
-                crate::scheduler::set_process_name(world, pid, name.to_string());
+            if crate::scheduler::rename_if_alive(world, pid, name.to_string()) {
                 Ok(json!(true))
             } else {
                 Ok(json!(false))

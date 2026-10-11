@@ -134,6 +134,7 @@ pub fn create_process(
     // Register before evaluating the entry script: synchronous code in the
     // script (e.g. a self-kill or `listProcesses()` call) must already see
     // this pid, mirroring the inbox-registration invariant in `spawn_process`.
+    *world.active.lock().unwrap() += 1;
     world.processes.lock().unwrap().insert(pid, shared.clone());
 
     let setup: Result<(), String> = ctx.with(|cx| {
@@ -157,6 +158,14 @@ pub fn create_process(
             Err(_) => Err(describe_catch(&cx)),
         }
     });
+    if setup.is_err() {
+        world.processes.lock().unwrap().remove(&pid);
+        let mut active = world.active.lock().unwrap();
+        *active = active.saturating_sub(1);
+        if *active == 0 {
+            world.active_cv.notify_all();
+        }
+    }
     setup.map(|()| Process { rt, ctx, shared })
 }
 

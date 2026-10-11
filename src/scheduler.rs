@@ -126,11 +126,9 @@ pub fn spawn_process(
         Ok(proc) => proc,
         Err(e) => {
             world.inboxes.lock().unwrap().remove(&pid);
-            world.processes.lock().unwrap().remove(&pid);
             return Err(e);
         }
     };
-    *world.active.lock().unwrap() += 1;
 
     let boxed = Box::new(proc);
     let status = *boxed.shared.status.lock().unwrap();
@@ -141,7 +139,11 @@ pub fn spawn_process(
         Status::Waiting if !boxed.rt.is_job_pending() => park(world, boxed),
         Status::Sleeping if !boxed.rt.is_job_pending() => park_sleep(world, boxed),
         _ => {
-            let _ = world.queue_tx.send(RunItem::Process(boxed));
+            if let Err(err) = world.queue_tx.send(RunItem::Process(boxed)) {
+                if let RunItem::Process(p) = err.0 {
+                    finish(world, p);
+                }
+            }
         }
     }
     Ok(pid)
@@ -189,7 +191,11 @@ pub fn deliver_json_string(world: &Arc<World>, pid: Pid, json: String) {
         // before the process is re-scheduled, so the woken process is
         // guaranteed to see it.
         if let Some(p) = world.parked.lock().unwrap().remove(&pid) {
-            let _ = world.queue_tx.send(RunItem::Process(p));
+            if let Err(err) = world.queue_tx.send(RunItem::Process(p)) {
+                if let RunItem::Process(p) = err.0 {
+                    finish(world, p);
+                }
+            }
         }
     }
 }
@@ -214,9 +220,17 @@ pub fn kill_process(world: &Arc<World>, pid: Pid) -> bool {
     // scheduling boundary and is reaped. Processes on the queue or in a
     // worker's hands need no relocation: their next slice sees `Killed`.
     if let Some(p) = world.parked.lock().unwrap().remove(&pid) {
-        let _ = world.queue_tx.send(RunItem::Process(p));
+        if let Err(err) = world.queue_tx.send(RunItem::Process(p)) {
+            if let RunItem::Process(p) = err.0 {
+                finish(world, p);
+            }
+        }
     } else if let Some(p) = world.sleeping.lock().unwrap().remove(&pid) {
-        let _ = world.queue_tx.send(RunItem::Process(p));
+        if let Err(err) = world.queue_tx.send(RunItem::Process(p)) {
+            if let RunItem::Process(p) = err.0 {
+                finish(world, p);
+            }
+        }
     }
     true
 }
@@ -262,6 +276,15 @@ pub fn set_process_name(world: &Arc<World>, pid: Pid, name: String) {
     if let Some(s) = world.processes.lock().unwrap().get(&pid) {
         *s.name.lock().unwrap() = name;
     }
+}
+
+pub fn rename_if_alive(world: &Arc<World>, pid: Pid, name: String) -> bool {
+    let registry = world.processes.lock().unwrap();
+    let Some(shared) = registry.get(&pid) else {
+        return false;
+    };
+    *shared.name.lock().unwrap() = name;
+    true
 }
 
 /// Worker entry point: pull processes off the run queue until stopped. Timers
@@ -344,18 +367,30 @@ fn run_slice(world: &Arc<World>, p: Box<Process>) {
         Status::Done | Status::Failed | Status::Killed => finish(world, p),
         // Jobs queued before the suspension run first; the process parks later.
         Status::Waiting | Status::Sleeping if p.rt.is_job_pending() => {
-            let _ = world.queue_tx.send(RunItem::Process(p));
+            if let Err(err) = world.queue_tx.send(RunItem::Process(p)) {
+                if let RunItem::Process(p) = err.0 {
+                    finish(world, p);
+                }
+            }
         }
         Status::Waiting => park(world, p),
         Status::Sleeping => park_sleep(world, p),
         // A process that yielded goes to the back of the run queue; its
         // resolver fires the next time a worker picks it up.
         Status::Yielding => {
-            let _ = world.queue_tx.send(RunItem::Process(p));
+            if let Err(err) = world.queue_tx.send(RunItem::Process(p)) {
+                if let RunItem::Process(p) = err.0 {
+                    finish(world, p);
+                }
+            }
         }
         Status::Running => {
             if p.rt.is_job_pending() {
-                let _ = world.queue_tx.send(RunItem::Process(p));
+                if let Err(err) = world.queue_tx.send(RunItem::Process(p)) {
+                    if let RunItem::Process(p) = err.0 {
+                        finish(world, p);
+                    }
+                }
             } else {
                 // Defensive: no waiter, no jobs, and the entry hook never
                 // fired. Treat as finished so nothing leaks.
@@ -518,7 +553,11 @@ fn service_timers(world: &Arc<World>) {
                 let p = world.sleeping.lock().unwrap().remove(&entry.pid);
                 if let Some(p) = p {
                     if wake_unit(&p, "__otter_sleep_resolve").is_ok() {
-                        let _ = world.queue_tx.send(RunItem::Process(p));
+                        if let Err(err) = world.queue_tx.send(RunItem::Process(p)) {
+                            if let RunItem::Process(p) = err.0 {
+                                finish(world, p);
+                            }
+                        }
                     } else {
                         fail(world, p, "failed to resume after sleep");
                     }
@@ -538,7 +577,11 @@ fn service_timers(world: &Arc<World>) {
                 };
                 if let Some(p) = p {
                     if wake_timeout(&p).is_ok() {
-                        let _ = world.queue_tx.send(RunItem::Process(p));
+                        if let Err(err) = world.queue_tx.send(RunItem::Process(p)) {
+                            if let RunItem::Process(p) = err.0 {
+                                finish(world, p);
+                            }
+                        }
                     } else {
                         fail(world, p, "failed to apply recv timeout");
                     }
