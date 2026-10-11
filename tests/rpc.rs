@@ -6,12 +6,12 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use otter_rt::scheduler::{RunItem, World, worker_loop};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Live server + worker under test.
 struct Harness {
@@ -38,7 +38,13 @@ fn start_harness() -> Harness {
     let s2 = shutdown.clone();
     let server = std::thread::spawn(move || otter_rt::rpc::serve_loop(listener, w2, s2));
 
-    Harness { world, worker, port, shutdown, server }
+    Harness {
+        world,
+        worker,
+        port,
+        shutdown,
+        server,
+    }
 }
 
 /// Stop the worker (so it exits) and ask the RPC server to shut down.
@@ -110,11 +116,21 @@ fn wait_until(h: &Harness, timeout: Duration) {
 fn rpc_list_reports_spawned_process() {
     let h = start_harness();
 
-    let resp = request_rpc(h.port, "spawn", json!({
-        "name": "waiter.js",
-        "code": "await recv();",
-    }));
-    let pid = resp.get("result").unwrap().get("pid").unwrap().as_u64().unwrap();
+    let resp = request_rpc(
+        h.port,
+        "spawn",
+        json!({
+            "name": "waiter.js",
+            "code": "await recv();",
+        }),
+    );
+    let pid = resp
+        .get("result")
+        .unwrap()
+        .get("pid")
+        .unwrap()
+        .as_u64()
+        .unwrap();
     assert_eq!(pid, 0, "first spawned process is pid 0");
 
     let list = request_rpc(h.port, "list", json!({}));
@@ -122,8 +138,14 @@ fn rpc_list_reports_spawned_process() {
     assert_eq!(arr.len(), 1, "one live process");
     let first = arr.first().unwrap();
     assert_eq!(first.get("pid").unwrap().as_u64().unwrap(), 0);
-    assert_eq!(first.get("name").unwrap().as_str().unwrap().to_owned(), "waiter.js");
-    assert_eq!(first.get("status").unwrap().as_str().unwrap().to_owned(), "waiting");
+    assert_eq!(
+        first.get("name").unwrap().as_str().unwrap().to_owned(),
+        "waiter.js"
+    );
+    assert_eq!(
+        first.get("status").unwrap().as_str().unwrap().to_owned(),
+        "waiting"
+    );
 
     teardown(h);
 }
@@ -165,7 +187,11 @@ fn rpc_kill_reaps_a_sleeping_process() {
 #[test]
 fn rpc_rename_is_visible_in_list() {
     let h = start_harness();
-    let _ = request_rpc(h.port, "spawn", json!({ "name": "orig.js", "code": "await sleep(60000);" }));
+    let _ = request_rpc(
+        h.port,
+        "spawn",
+        json!({ "name": "orig.js", "code": "await sleep(60000);" }),
+    );
 
     let resp = request_rpc(h.port, "rename", json!({ "pid": 0, "name": "renamed.js" }));
     assert!(resp.get("result").unwrap().as_bool().unwrap());
@@ -173,7 +199,10 @@ fn rpc_rename_is_visible_in_list() {
     let list = request_rpc(h.port, "list", json!({}));
     let arr = list.get("result").unwrap().as_array().unwrap();
     let first = arr.first().unwrap();
-    assert_eq!(first.get("name").unwrap().as_str().unwrap().to_owned(), "renamed.js");
+    assert_eq!(
+        first.get("name").unwrap().as_str().unwrap().to_owned(),
+        "renamed.js"
+    );
 
     teardown(h);
 }
@@ -198,13 +227,34 @@ fn rpc_unknown_pid_yields_null_and_false() {
 #[test]
 fn rpc_count_tracks_player() {
     let h = start_harness();
-    assert_eq!(request_rpc(h.port, "count", json!({})).get("result").unwrap().as_u64().unwrap(), 0);
+    assert_eq!(
+        request_rpc(h.port, "count", json!({}))
+            .get("result")
+            .unwrap()
+            .as_u64()
+            .unwrap(),
+        0
+    );
 
     let _ = request_rpc(h.port, "spawn", json!({ "code": "await recv();" }));
-    assert_eq!(request_rpc(h.port, "count", json!({})).get("result").unwrap().as_u64().unwrap(), 1);
+    assert_eq!(
+        request_rpc(h.port, "count", json!({}))
+            .get("result")
+            .unwrap()
+            .as_u64()
+            .unwrap(),
+        1
+    );
 
     let _ = request_rpc(h.port, "spawn", json!({ "code": "await recv();" }));
-    assert_eq!(request_rpc(h.port, "count", json!({})).get("result").unwrap().as_u64().unwrap(), 2);
+    assert_eq!(
+        request_rpc(h.port, "count", json!({}))
+            .get("result")
+            .unwrap()
+            .as_u64()
+            .unwrap(),
+        2
+    );
 
     teardown(h);
 }
@@ -243,7 +293,11 @@ fn rpc_notification_gets_no_response() {
     let h = start_harness();
     // A request with no `id` is a JSON-RPC notification: the server must not
     // reply. A short read timeout proves silence rather than blocking.
-    let resp: std::io::Result<String> = request_raw(h.port, r#"{"jsonrpc":"2.0","method":"count"}"#, Duration::from_millis(300));
+    let resp: std::io::Result<String> = request_raw(
+        h.port,
+        r#"{"jsonrpc":"2.0","method":"count"}"#,
+        Duration::from_millis(300),
+    );
     assert!(resp.is_err(), "notification must not produce a response");
     teardown(h);
 }
@@ -257,8 +311,15 @@ fn rpc_shutdown_stops_the_server() {
     // The server thread returns once it observes the shutdown flag.
     let _ = h.server.join();
     // A fresh connection is now refused (the listener is closed).
-    let resp: std::io::Result<String> = request_raw(h.port, r#"{"jsonrpc":"2.0","method":"count","id":1}"#, Duration::from_secs(2));
-    assert!(resp.is_err(), "server socket should be closed after shutdown");
+    let resp: std::io::Result<String> = request_raw(
+        h.port,
+        r#"{"jsonrpc":"2.0","method":"count","id":1}"#,
+        Duration::from_secs(2),
+    );
+    assert!(
+        resp.is_err(),
+        "server socket should be closed after shutdown"
+    );
 
     let _ = h.world.queue_tx.send(RunItem::Stop);
     let _ = h.worker.join();
@@ -275,8 +336,9 @@ fn rpc_idle_client_does_not_block_other_clients() {
 
     // A stuck client: connect and never send a line. Its connection thread
     // blocks in read() waiting for input that never arrives.
-    let _stuck = std::net::TcpStream::connect(SocketAddr::new("127.0.0.1".parse().unwrap(), h.port))
-        .expect("stuck client connect");
+    let _stuck =
+        std::net::TcpStream::connect(SocketAddr::new("127.0.0.1".parse().unwrap(), h.port))
+            .expect("stuck client connect");
 
     // A second client should still be served promptly rather than queued
     // behind the stuck one.
@@ -307,7 +369,10 @@ fn rpc_oversized_line_gets_an_error_and_server_survives() {
     });
     let mut line = String::new();
     BufReader::new(sock).read_line(&mut line).unwrap();
-    assert!(line.contains("request too large"), "unexpected reply: {line}");
+    assert!(
+        line.contains("request too large"),
+        "unexpected reply: {line}"
+    );
     let _ = sender.join();
 
     // Other clients are unaffected.

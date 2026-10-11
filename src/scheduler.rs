@@ -410,7 +410,11 @@ fn park(world: &Arc<World>, p: Box<Process>) {
         Ok(json) => {
             drop(parked);
             if wake_with(&p, json).is_ok() {
-                let _ = world.queue_tx.send(RunItem::Process(p));
+                if let Err(err) = world.queue_tx.send(RunItem::Process(p)) {
+                    if let RunItem::Process(p) = err.0 {
+                        finish(world, p);
+                    }
+                }
             } else {
                 fail(world, p, "failed to deliver message");
             }
@@ -527,9 +531,9 @@ fn service_timers(world: &Arc<World>) {
                 // recv(), this deadline is stale and must not reject it.
                 let p = {
                     let mut parked = world.parked.lock().unwrap();
-                    let due = parked
-                        .get(&entry.pid)
-                        .is_some_and(|p| *p.shared.deadline.lock().unwrap() == Some(entry.deadline));
+                    let due = parked.get(&entry.pid).is_some_and(|p| {
+                        *p.shared.deadline.lock().unwrap() == Some(entry.deadline)
+                    });
                     if due { parked.remove(&entry.pid) } else { None }
                 };
                 if let Some(p) = p {
@@ -546,7 +550,7 @@ fn service_timers(world: &Arc<World>) {
 
 fn fail(world: &Arc<World>, p: Box<Process>, msg: &str) {
     eprintln!("[pid {}] error: {msg}", p.shared.pid);
-    *p.shared.status.lock().unwrap() = Status::Failed;
+    p.shared.set_status_unless_killed(Status::Failed);
     finish(world, p);
 }
 

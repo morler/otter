@@ -8,7 +8,10 @@ fn run_otter(test: &str, source: &str) -> Output {
     std::fs::create_dir_all(&dir).unwrap();
     let script = dir.join("script.js");
     std::fs::write(&script, source).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_otter")).arg(&script).output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_otter"))
+        .arg(&script)
+        .output()
+        .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     out
 }
@@ -34,6 +37,9 @@ fn console_error_writes_to_stderr_not_stdout() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stdout.contains("ok") && !stdout.contains("boom"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("ok") && !stdout.contains("boom"),
+        "stdout: {stdout}"
+    );
     assert!(stderr.contains("boom"), "stderr: {stderr}");
 }

@@ -172,7 +172,7 @@ fn sleep_resumes_after_delay() {
 fn top_level_await_sleep_parks_entry_script() {
     // The entry script suspends before returning; spawn_process must park it
     // in the sleeping map (not the run queue) and the timer must resume it.
-    
+
     run_script(
         "top.js",
         r#"
@@ -242,7 +242,7 @@ fn message_that_races_a_timeout_is_still_delivered() {
 fn sleeping_process_does_not_block_others() {
     // While the sleeper is parked, pid 0 must still be able to ping-pong
     // with a third process, then receive the sleeper's wake-up message.
-    
+
     run_script(
         "a.js",
         r#"
@@ -272,7 +272,7 @@ fn sleeping_process_does_not_block_others() {
 fn sleep_then_plain_recv_has_no_stale_timeout() {
     // Regression: after a sleep wakes, a subsequent plain recv() must not
     // inherit the (stale) sleep deadline as a recv timeout.
-    
+
     run_script(
         "a.js",
         r#"
@@ -611,7 +611,7 @@ fn restrictsandbox_unknown_target_is_typeerror_after_privilege() {
 fn spawn_inherits_parent_sandbox_by_default() {
     // A confined root: its children inherit confinement even without an
     // explicit override (no-escalation by inheritance).
-    
+
     run_script(
         "confined-root.js",
         r#"
@@ -924,7 +924,7 @@ fn sandbox_inherits_through_privileged_chain() {
 fn busy_queue_does_not_starve_sleep() {
     // One worker and a process that never blocks. The sleeper must still wake
     // on time; otherwise the busy loop never ends and the test times out.
-    
+
     run_script(
         "busy.js",
         r#"
@@ -967,7 +967,7 @@ fn recv_timeout_of_an_earlier_wait_does_not_fire_later() {
 fn job_queued_before_recv_runs_while_suspended() {
     // The async continuation is queued before recv() suspends the entry script.
     // It must still run, or nothing ever sends the message and the test hangs.
-    
+
     run_script(
         "job.js",
         r#"
@@ -983,7 +983,7 @@ fn job_queued_before_recv_runs_while_suspended() {
 fn second_suspension_while_recv_is_pending_is_type_error() {
     // A second recv() must be rejected, not silently replace the first one's
     // resolver (which would leave `first` pending forever).
-    
+
     run_script(
         "overlap.js",
         r#"
@@ -1008,7 +1008,7 @@ fn job_queued_before_sleep_runs_during_the_sleep() {
     // The job is queued before sleep() suspends the entry script. It must run
     // right away, so the child it spawns reports a time near t0, not after the
     // 1000 ms sleep has ended.
-    
+
     run_script(
         "sleep_job.js",
         r#"

@@ -165,10 +165,17 @@ pub fn create_process(
 /// promise would never settle.
 fn ensure_not_suspended(cx: &Ctx<'_>) -> rquickjs::Result<()> {
     let globals = cx.globals();
-    for slot in ["__otter_recv_resolve", "__otter_sleep_resolve", "__otter_yield_resolve"] {
+    for slot in [
+        "__otter_recv_resolve",
+        "__otter_sleep_resolve",
+        "__otter_yield_resolve",
+    ] {
         let pending: Option<Function> = globals.get(slot)?;
         if pending.is_some() {
-            return Err(js_type_error(cx, "a recv(), sleep() or yieldNow() is already pending"));
+            return Err(js_type_error(
+                cx,
+                "a recv(), sleep() or yieldNow() is already pending",
+            ));
         }
     }
     Ok(())
@@ -282,8 +289,7 @@ fn install_messaging<'js>(
                         cx.globals().set("__otter_recv_reject", reject)?;
                         if let Some(ms) = timeout_ms.0 {
                             let ms = if ms.is_finite() { ms.max(0.0) } else { 0.0 };
-                            *s.deadline.lock().unwrap() =
-                                Some(Instant::now() + Duration::from_millis(ms as u64));
+                            *s.deadline.lock().unwrap() = deadline_after_ms(ms);
                         }
                         s.set_status_unless_killed(Status::Waiting);
                     }
@@ -308,8 +314,7 @@ fn install_messaging<'js>(
                 let (promise, resolve, _reject) = Promise::new(&cx)?;
                 let ms = if ms.is_finite() { ms.max(0.0) } else { 0.0 };
                 cx.globals().set("__otter_sleep_resolve", resolve)?;
-                *s.deadline.lock().unwrap() =
-                    Some(Instant::now() + Duration::from_millis(ms as u64));
+                *s.deadline.lock().unwrap() = deadline_after_ms(ms);
                 s.set_status_unless_killed(Status::Sleeping);
                 Ok(promise)
             },
@@ -387,10 +392,13 @@ fn install_sandbox_api<'js>(
     let s = shared.clone();
     globals.set(
         "selfSandbox",
-        Function::new(cx.clone(), move |cx: Ctx<'js>| -> rquickjs::Result<Value<'js>> {
-            let sb = *s.sandbox.lock().unwrap();
-            sandbox_snapshot(&cx, &sb)
-        })?,
+        Function::new(
+            cx.clone(),
+            move |cx: Ctx<'js>| -> rquickjs::Result<Value<'js>> {
+                let sb = *s.sandbox.lock().unwrap();
+                sandbox_snapshot(&cx, &sb)
+            },
+        )?,
     )?;
 
     // Narrow a sandbox at runtime. Monotonic: only intersections, so a
@@ -413,12 +421,13 @@ fn install_sandbox_api<'js>(
             move |cx: Ctx<'js>,
                   policy: Opt<Value<'js>>,
                   opts: Opt<Value<'js>>|
-                -> rquickjs::Result<Value<'js>> {
+                  -> rquickjs::Result<Value<'js>> {
                 // Parse the partial policy: only `canSpawnAndKill` for now.
                 let req_csk: Option<bool> = match &policy.0 {
-                    Some(v) if v.is_object() => {
-                        v.as_object().unwrap().get::<_, Option<bool>>("canSpawnAndKill")?
-                    }
+                    Some(v) if v.is_object() => v
+                        .as_object()
+                        .unwrap()
+                        .get::<_, Option<bool>>("canSpawnAndKill")?,
                     _ => None,
                 };
                 // Target pid: defaults to self.
@@ -644,10 +653,20 @@ pub fn js_named_error(cx: &Ctx<'_>, class: &str, msg: &str) -> rquickjs::Error {
         .flatten()
         .and_then(|s| s.to_string().ok())
         .unwrap_or_else(|| "\"error\"".to_string());
-    match cx.eval::<Value, _>(format!("new {class}({literal})")) {
+    let constructor = match class {
+        "TypeError" => "TypeError",
+        "PermissionError" => "PermissionError",
+        _ => return rquickjs::Error::new_from_js_message("value", "message", msg),
+    };
+    match cx.eval::<Value, _>(format!("new {constructor}({literal})")) {
         Ok(e) => cx.throw(e),
         Err(_) => rquickjs::Error::new_from_js_message("value", "message", msg),
     }
+}
+
+fn deadline_after_ms(ms: f64) -> Option<Instant> {
+    let duration = Duration::from_secs_f64((ms / 1000.0).min(365.0 * 24.0 * 60.0 * 60.0));
+    Instant::now().checked_add(duration)
 }
 
 /// Build a `TypeError` and return it as an `Error::Exception`.

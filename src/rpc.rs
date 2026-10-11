@@ -18,10 +18,10 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::process::Sandbox;
 use crate::scheduler::World;
@@ -143,9 +143,14 @@ fn dispatch(
         )),
         "count" => Ok(json!(crate::scheduler::process_count(world))),
         "info" => {
-            let pid = params.get("pid").and_then(Value::as_u64).unwrap_or(u64::MAX);
+            let pid = params
+                .get("pid")
+                .and_then(Value::as_u64)
+                .unwrap_or(u64::MAX);
             match crate::scheduler::process_info(world, pid) {
-                Some((pid, name, status)) => Ok(json!({ "pid": pid, "name": name, "status": status })),
+                Some((pid, name, status)) => {
+                    Ok(json!({ "pid": pid, "name": name, "status": status }))
+                }
                 None => Ok(Value::Null),
             }
         }
@@ -161,11 +166,17 @@ fn dispatch(
             }
         }
         "kill" => {
-            let pid = params.get("pid").and_then(Value::as_u64).unwrap_or(u64::MAX);
+            let pid = params
+                .get("pid")
+                .and_then(Value::as_u64)
+                .unwrap_or(u64::MAX);
             Ok(json!(crate::scheduler::kill_process(world, pid)))
         }
         "send" => {
-            let pid = params.get("pid").and_then(Value::as_u64).unwrap_or(u64::MAX);
+            let pid = params
+                .get("pid")
+                .and_then(Value::as_u64)
+                .unwrap_or(u64::MAX);
             let value = params.get("value").cloned().unwrap_or(Value::Null);
             // The value was already JSON on the wire; pass it through
             // pre-serialized so no QuickJS context is needed here.
@@ -174,7 +185,10 @@ fn dispatch(
             Ok(json!(true))
         }
         "rename" => {
-            let pid = params.get("pid").and_then(Value::as_u64).unwrap_or(u64::MAX);
+            let pid = params
+                .get("pid")
+                .and_then(Value::as_u64)
+                .unwrap_or(u64::MAX);
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             if crate::scheduler::is_process_alive(world, pid) {
                 crate::scheduler::set_process_name(world, pid, name.to_string());

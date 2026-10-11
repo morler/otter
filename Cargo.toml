@@ -2,6 +2,7 @@
 name = "otter-rt"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 authors = ["Giuseppe Della Vedova"]
 license = "MIT"
 description = "Experimental multithreaded JS runtime"
