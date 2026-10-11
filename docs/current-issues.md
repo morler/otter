@@ -31,7 +31,7 @@
 - [x] `examples/sandbox.js` 去除固定延时（spawn 返回时子进程已挂起）；对 narrow 结果断言。消息顺序由同步 spawn 决定，非竞态；无界 `recv` 未改。
 - [x] `examples/ring.js` 计数改为“经过的 worker 数”；`recv` 加 10 秒超时，worker 异常退出时报告 token 丢失。
 - [x] `tests/cli.rs` 唯一临时目录 + `Drop` 清理；stderr 断言不得包含 stdout 文本（提交 0a36133）。
-- [ ] `tests/e2e.rs` worker 在断言失败时停止并 join（已完成，提交 0a36133）；固定 sleep 与 wall-clock 断言仍未改。
+- [x] `tests/e2e.rs` worker 断言失败时仍停止并 join（提交 0a36133）；“let it park”固定延时删除（spawn 同步挂起）；kill/自杀回收改为 2 秒有界轮询；唤醒上限放宽为 10 秒。未改：`busy_queue_does_not_starve_sleep` 的 1 秒饥饿阈值仍是 wall-clock 断言。验证：串行 15 次与 4 路并发 ×5 轮全部通过。
 - [x] `tests/rpc.rs` EOF 作为错误报告；通知测试只接受读超时；teardown 前关闭闲置客户端（提交 0a36133）。
 
 ## P3 — 维护债务与配置缺口

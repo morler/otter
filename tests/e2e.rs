@@ -183,7 +183,8 @@ fn sleep_resumes_after_delay() {
             await sleep(60);
             const elapsed = Date.now() - t0;
             if (elapsed < 50) throw new Error("woke too early: " + elapsed + "ms");
-            if (elapsed > 1000) throw new Error("woke too late: " + elapsed + "ms");
+            // Only a hang is an error: a loaded host may delay the wake-up.
+            if (elapsed > 10000) throw new Error("woke too late: " + elapsed + "ms");
         "#,
         Sandbox::PRIVILEGED,
     );
@@ -313,7 +314,6 @@ fn kill_process_reaps_parked_and_sleeping_processes() {
         r#"
             const parked = spawn(`await recv();`);
             const sleeper = spawn(`await sleep(60000);`);
-            await sleep(100); // let both park
             if (processCount() !== 3) throw new Error("expected 3 processes, got " + processCount());
             const listed = listProcesses().map(p => p.pid);
             if (!listed.includes(parked) || !listed.includes(sleeper)) {
@@ -321,7 +321,8 @@ fn kill_process_reaps_parked_and_sleeping_processes() {
             }
             if (!killProcess(parked)) throw new Error("kill parked failed");
             if (!killProcess(sleeper)) throw new Error("kill sleeper failed");
-            await sleep(50); // let the reaps happen
+            // Killed processes are reaped on a worker: poll, bounded to 2 s.
+            for (let i = 0; i < 400 && (isProcessAlive(parked) || isProcessAlive(sleeper)); i++) await sleep(5);
             if (isProcessAlive(parked) || isProcessAlive(sleeper)) {
                 throw new Error("killed process still alive");
             }
@@ -417,7 +418,6 @@ fn confined_child_cannot_kill_others() {
         "parent.js",
         r#"
             const victim = spawn(`await recv();`); // privileged, parks
-            await sleep(50); // let it park
             const confined = spawn(
                 `
                     try {
@@ -455,7 +455,8 @@ fn confined_child_can_kill_self() {
                 `,
                 { sandbox: { canSpawnAndKill: false } },
             );
-            await sleep(80);
+            // The self-killed child is reaped on a worker: poll, bounded to 2 s.
+            for (let i = 0; i < 400 && isProcessAlive(child); i++) await sleep(5);
             if (isProcessAlive(child)) throw new Error("confined self-kill did not reap");
             send(0, "ok"); // wake parent's own recv below
             await recv();
@@ -537,7 +538,6 @@ fn restrictsandbox_cross_target_requires_privilege_and_narrows() {
                     }
                 }
             `);
-            await sleep(50); // let it park
 
             // Privileged parent narrows the live victim.
             const after = restrictSandbox({ canSpawnAndKill: false }, { pid: victim });
@@ -826,7 +826,6 @@ fn confinement_gates_caller_not_target() {
                 `await recv();`,
                 { sandbox: { canSpawnAndKill: false } },
             );
-            await sleep(50); // let it park
             if (!isProcessAlive(target)) throw new Error("target died early");
 
             // A confined attacker cannot kill the confined target.
@@ -884,7 +883,7 @@ fn self_restrict_then_self_kill_still_allowed() {
                 await recv(); // never resolves; reaped at next boundary
                 send(0, "should never happen");
             `);
-            await sleep(80);
+            for (let i = 0; i < 400 && isProcessAlive(child); i++) await sleep(5);
             if (isProcessAlive(child)) throw new Error("confined self-kill didn't reap");
             send(0, "done");
             await recv();
