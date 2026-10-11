@@ -33,6 +33,9 @@ struct Args {
     /// Stay alive after entry scripts finish, even without RPC.
     #[arg(long)]
     persistent: bool,
+    /// Stop a process whose single synchronous job runs longer than MS milliseconds (default: no limit)
+    #[arg(long, value_name = "MS")]
+    max_job_ms: Option<u64>,
     /// Entry scripts; each file starts as its own process
     #[arg(required = true)]
     scripts: Vec<PathBuf>,
@@ -41,7 +44,7 @@ struct Args {
 fn main() {
     let args = Args::parse();
     let workers = args.workers.max(1);
-    let world = World::new();
+    let world = World::with_max_job(args.max_job_ms.map(Duration::from_millis));
     let mut handles = Vec::with_capacity(workers);
     for i in 0..workers {
         let w = world.clone();

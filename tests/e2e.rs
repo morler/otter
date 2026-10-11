@@ -1041,3 +1041,25 @@ fn job_queued_before_sleep_runs_during_the_sleep() {
         Sandbox::PRIVILEGED,
     );
 }
+
+#[test]
+fn job_over_budget_fails_the_process() {
+    // The loop runs in a job woken by a timer (the `run_slice` path), not in
+    // the spawn-time evaluation (checked by hand; no test covers it yet).
+    let world = World::with_max_job(Some(Duration::from_millis(50)));
+    let _worker = WorkerGuard::start(&world);
+    spawn_process(
+        &world,
+        "spin",
+        "await sleep(10); while (true) {}",
+        Sandbox::PRIVILEGED,
+    )
+    .unwrap();
+    let active = world.active.lock().unwrap();
+    let (_guard, timed_out) = world
+        .active_cv
+        .wait_timeout_while(active, Duration::from_secs(10), |a| *a > 0)
+        .unwrap();
+    assert!(!timed_out.timed_out(), "spinning process was never stopped");
+    assert_eq!(world.failed.load(std::sync::atomic::Ordering::Relaxed), 1);
+}

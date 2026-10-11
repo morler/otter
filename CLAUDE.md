@@ -20,7 +20,7 @@ One process = one QuickJS `Runtime` + `Context` + mailbox (`src/process.rs`). Pr
 
 **Shared state.** Everything mutable lives in `World` (`src/scheduler.rs`): the run queue, the `parked` and `sleeping` maps, the timer heap, inbox senders, the `processes` registry, the `active` counter, and the `failed` counter. `main.rs` and `rpc.rs` both hold an `Arc<World>`.
 
-**Slice (`run_slice`).** Wake the process according to its status, run exactly one pending job (`execute_pending_job`), then route on the resulting `Status`: finish, park, sleep, or re-queue.
+**Slice (`run_slice`).** Wake the process according to its status, run exactly one pending job (`execute_pending_job`; `timed_job` times it when `World::max_job` / `--max-job-ms` is set, and an overrun fails the process), then route on the resulting `Status`: finish, park, sleep, or re-queue.
 
 **Creation runs on the caller's thread.** `spawn_process` evaluates the child's source up to its first `await` synchronously. The thread that calls spawn does this work: a worker for JS `spawn`, or the RPC connection thread for RPC `spawn`.
 

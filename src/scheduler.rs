@@ -84,10 +84,16 @@ pub struct World {
     pub active: Mutex<usize>,
     pub active_cv: Condvar,
     pub failed: AtomicU64,
+    /// Per-job time budget (`--max-job-ms`); `None` means no limit.
+    pub max_job: Option<Duration>,
 }
 
 impl World {
     pub fn new() -> Arc<Self> {
+        Self::with_max_job(None)
+    }
+
+    pub fn with_max_job(max_job: Option<Duration>) -> Arc<Self> {
         let (queue_tx, queue_rx) = crossbeam_channel::unbounded();
         Arc::new(World {
             queue_tx,
@@ -101,6 +107,7 @@ impl World {
             active: Mutex::new(0),
             active_cv: Condvar::new(),
             failed: AtomicU64::new(0),
+            max_job,
         })
     }
 }
@@ -355,9 +362,13 @@ fn run_slice(world: &Arc<World>, p: Box<Process>) {
         && status != Status::Failed
         && status != Status::Killed
         && p.rt.is_job_pending()
-        && let Err(exc) = p.rt.execute_pending_job()
+        && let Err(exc) = timed_job(&p.shared, || p.rt.execute_pending_job())
     {
-        let msg = exception_message(&exc.0);
+        let msg = if p.shared.job_overran.swap(false, Ordering::Relaxed) {
+            "job ran past the --max-job-ms budget".to_string()
+        } else {
+            exception_message(&exc.0)
+        };
         eprintln!("[pid {}] unhandled exception: {msg}", p.shared.pid);
         p.shared.set_status_unless_killed(Status::Failed);
     }
@@ -398,6 +409,15 @@ fn run_slice(world: &Arc<World>, p: Box<Process>) {
             }
         }
     }
+}
+
+/// Run one job with the per-job clock running. The interrupt handler that
+/// `create_process` installs (when `World::max_job` is set) reads this clock.
+pub(crate) fn timed_job<T>(shared: &ProcShared, run: impl FnOnce() -> T) -> T {
+    *shared.job_started.lock().unwrap() = Some(Instant::now());
+    let out = run();
+    *shared.job_started.lock().unwrap() = None;
+    out
 }
 
 /// Resolve the stashed `recv()` resolver with a buffered message.

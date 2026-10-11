@@ -30,7 +30,7 @@ cargo install otter-rt
 
 ```sh
 cargo build --release
-otter [--workers N] script.js [more_scripts.js ...]
+otter [--workers N] [--max-job-ms MS] script.js [more_scripts.js ...]
 ```
 
 Every file on the command line starts as its own process (pids `0..n`); the
@@ -59,8 +59,10 @@ Each request carries a numeric/string `id` and receives a matching response;
 notifications (no `id`) get none, per the JSON-RPC 2.0 spec.
 
 **The control port has no login.** Anyone who can connect to it can start,
-kill and message any process. It listens on `127.0.0.1` by default; a
-non-loopback `--rpc-host` prints a warning at startup. Each request line is
+kill and message any process. It listens on `127.0.0.1` by default, and a
+non-loopback `--rpc-host` is refused at startup. **Trust model:** otter is a
+single-user development tool. Any local user can connect to the port, so keep
+`--rpc-port` off on machines where other users are not trusted. Each request line is
 limited to 1 MiB, and a connection that sends nothing for 60 seconds is closed.
 
 ## JS API
@@ -100,6 +102,7 @@ cargo run --release -- examples/sandbox.js           # spawn confined children, 
 
 - Cooperative scheduling: a long synchronous loop without `await`/`yieldNow()`
   monopolizes its worker thread until it suspends (no preemption yet).
+- Optional bound: `--max-job-ms MS` fails a process whose single synchronous run exceeds MS milliseconds. Off by default. A stopped job cannot resume (QuickJS cannot pause mid-job), so that process is lost.
 - Killing is cooperative too: `killProcess()` takes effect at the target's next
   scheduling boundary, so a process stuck in a long synchronous loop won't die
   until it yields.

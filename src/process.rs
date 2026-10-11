@@ -1,6 +1,7 @@
 //! A single BEAM-like process: its own QuickJS runtime (isolated heap),
 //! its mailbox, and the JS API injected into its global scope.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -84,6 +85,12 @@ pub struct ProcShared {
     /// afterwards via `restrictSandbox`. A mutex even with a single bool so
     /// future toggles can be mutated in place without an API churn.
     pub sandbox: Mutex<Sandbox>,
+    /// Start time of the job now running, if any. The interrupt handler reads
+    /// it to enforce `World::max_job`.
+    pub job_started: Mutex<Option<Instant>>,
+    /// Set by the interrupt handler when it stops a job over budget, so the
+    /// scheduler reports the cause instead of QuickJS's "interrupted".
+    pub job_overran: AtomicBool,
 }
 
 impl ProcShared {
@@ -130,6 +137,8 @@ pub fn create_process(
         status: Mutex::new(Status::Running),
         deadline: Mutex::new(None),
         sandbox: Mutex::new(sandbox),
+        job_started: Mutex::new(None),
+        job_overran: AtomicBool::new(false),
     });
     // Register before evaluating the entry script: synchronous code in the
     // script (e.g. a self-kill or `listProcesses()` call) must already see
@@ -137,7 +146,26 @@ pub fn create_process(
     *world.active.lock().unwrap() += 1;
     world.processes.lock().unwrap().insert(pid, shared.clone());
 
-    let setup: Result<(), String> = ctx.with(|cx| {
+    if let Some(budget) = world.max_job {
+        // shortcut: a job is stopped whole, not paused (QuickJS cannot suspend
+        // mid-job), so an overrun kills the process; upgrade to a cooperative
+        // yield if long-running jobs must survive.
+        let s = shared.clone();
+        rt.set_interrupt_handler(Some(Box::new(move || {
+            let over = s
+                .job_started
+                .lock()
+                .unwrap()
+                .is_some_and(|t| t.elapsed() > budget);
+            if over {
+                s.job_overran.store(true, Ordering::Relaxed);
+            }
+            over
+        })));
+    }
+    // The entry script runs synchronously here, so it gets the same budget.
+    let setup: Result<(), String> = scheduler::timed_job(&shared, || {
+        ctx.with(|cx| {
         setup_globals(&cx, world, &shared).map_err(|e| e.to_string())?;
         let mut options = EvalOptions::default();
         options.promise = true;
@@ -156,6 +184,14 @@ pub fn create_process(
                 Ok(())
             }
             Err(_) => Err(describe_catch(&cx)),
+        }
+    })
+    });
+    let setup = setup.map_err(|e| {
+        if shared.job_overran.swap(false, Ordering::Relaxed) {
+            "job ran past the --max-job-ms budget".to_string()
+        } else {
+            e
         }
     });
     if setup.is_err() {
