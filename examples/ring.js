@@ -14,5 +14,10 @@ for (let i = SIZE - 1; i > 0; i--) {
 
 const t0 = Date.now();
 send(next, 0);
-const hops = await recv();
-console.log(`token passed ${hops} processes in ${Date.now() - t0} ms (ring size ${SIZE})`);
+// A worker that exits without forwarding would hang the root, so bound the wait.
+const hops = await recv(10000).catch((e) => {
+  if (e instanceof TimeoutError) return null;
+  throw e;
+});
+if (hops === null) console.log("token lost: not back within 10 s");
+else console.log(`token passed through ${hops} workers in ${Date.now() - t0} ms (ring of ${SIZE} processes incl. pid 0)`);

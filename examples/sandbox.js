@@ -81,9 +81,9 @@ const victim = spawn(`
     }
   }
 `);
-await sleep(50); // let it park
-
+// victim is already parked: spawn runs its code up to the first await.
 const narrowed = restrictSandbox({ canSpawnAndKill: false }, { pid: victim });
+if (narrowed.canSpawnAndKill !== false) throw new Error("victim was not narrowed");
 console.log("narrowed victim to:", JSON.stringify(narrowed));
 
 send(victim, "try-spawn");

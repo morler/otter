@@ -25,19 +25,19 @@
 
 ## P2 — 示例与测试可靠性
 
-- [ ] `examples/ping_pong.js` 接收值可能为 null；send 拒绝未处理。
-- [ ] `examples/process_mgmt.js` 固定延时导致启动/回收/完成状态不确定。
-- [ ] `examples/timer.js` 慢回复遗留、所有错误被误报为超时、spawn 句柄未观察。
-- [ ] `examples/sandbox.js` 消息顺序依赖调度、固定延时、无界等待、未断言权限变化。
-- [ ] `examples/ring.js` 实为单向链、计数少一、失败时可能无限等待。
-- [ ] `tests/cli.rs` 临时目录可预测且失败不清理；stdout/stderr 分流断言不完整。
-- [ ] `tests/e2e.rs` 断言失败时 worker 未必停止/join；固定 sleep 与 wall-clock 断言易抖动。
-- [ ] `tests/rpc.rs` EOF/I/O 错误处理不清晰；teardown 未清理闲置客户端线程。
+- [ ] `examples/ping_pong.js`：未改。`send` 不返回失败（docs/api.md：发往已结束 pid 静默丢弃），`recv()` 仅在收到 `null` 消息时返回 `null`，协议中父进程从不发送 `null` 给子进程，因此扫描结论不成立。
+- [x] `examples/process_mgmt.js` 去除启动固定延时；杀死后轮询至回收（有界 500 ms）；幸存者确认后再打印 `done`。
+- [x] `examples/timer.js` 非 `TimeoutError` 异常重新抛出。慢回复的生命周期未改（进程结束时邮箱随之丢弃）；未观察的 spawn 句柄未改。
+- [x] `examples/sandbox.js` 去除固定延时（spawn 返回时子进程已挂起）；对 narrow 结果断言。消息顺序由同步 spawn 决定，非竞态；无界 `recv` 未改。
+- [x] `examples/ring.js` 计数改为“经过的 worker 数”；`recv` 加 10 秒超时，worker 异常退出时报告 token 丢失。
+- [x] `tests/cli.rs` 唯一临时目录 + `Drop` 清理；stderr 断言不得包含 stdout 文本（提交 0a36133）。
+- [ ] `tests/e2e.rs` worker 在断言失败时停止并 join（已完成，提交 0a36133）；固定 sleep 与 wall-clock 断言仍未改。
+- [x] `tests/rpc.rs` EOF 作为错误报告；通知测试只接受读超时；teardown 前关闭闲置客户端（提交 0a36133）。
 
 ## P3 — 维护债务与配置缺口
 
-- [ ] `Cargo.toml` 声明 Rust 1.85 MSRV（与 edition 2024 对齐）。
-- [ ] `.gitignore` 清理重复/过宽 target/debug 规则；确认 `jevmem.config.json` 忽略策略并提供模板/说明。
+- [x] `Cargo.toml` 声明 Rust 1.85 MSRV（与 edition 2024 对齐）。
+- [x] `.gitignore` 已只保留 `/target`，无过宽 `debug` 规则。`jevmem.config.json` / `JEVMEM.md` 故意不入库：本地工具配置，仓库内无代码或文档读取它（提交 51c01fb）。
 
 ## 修复记录
 

@@ -17,6 +17,7 @@ for (let i = 0; i < 2; i++) {
     const reply = await recv(200);
     console.log("replied in time:", reply.result);
   } catch (e) {
+    if (!(e instanceof TimeoutError)) throw e; // only a missed deadline is expected here
     console.log("timed out waiting for a reply:", e.name);
   }
 }
