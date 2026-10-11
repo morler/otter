@@ -44,7 +44,7 @@
 - [x] `tests/cli.rs` 唯一临时目录 + `Drop` 清理；stderr 断言不得包含 stdout 文本（提交 0a36133）。
 - [x] `tests/e2e.rs` worker 断言失败时仍停止并 join（提交 0a36133）；“let it park”固定延时删除（spawn 同步挂起）；kill/自杀回收改为 2 秒有界轮询；唤醒上限放宽为 10 秒。未改：`busy_queue_does_not_starve_sleep` 的 1 秒饥饿阈值仍是 wall-clock 断言。验证：串行 15 次与 4 路并发 ×5 轮全部通过。
 - [x] `tests/rpc.rs` EOF 作为错误报告；通知测试只接受读超时；teardown 前关闭闲置客户端（提交 0a36133）。
-- [ ] **测试失败路径清理**（补扫，中）：`tests/e2e.rs:78-81` 工作线程仅在成功路径停止，应统一用 `WorkerGuard`；`tests/e2e.rs:44-46` 丢弃 join 结果；`:45` 无界 join 可能绕过完成超时。`tests/rpc.rs:17-19` 失败路径不清理，`:53-55` 丢弃 join 结果，`:357-358` join 无期限。
+- [ ] **测试失败路径清理**（补扫，中）：`tests/e2e.rs:78-81` 工作线程仅在成功路径停止，应统一用 `WorkerGuard`；`tests/e2e.rs:44-46` 丢弃 join 结果；`:45` 无界 join 可能绕过完成超时。`tests/rpc.rs:17-19` 失败路径不清理，`:53-55` 丢弃 join 结果，`:357-358` join 无期限；`:412-415` 发送超大请求时无写超时。
 - [ ] **测试断言过宽**（补扫，中）：`tests/rpc.rs:364-367` 任何 `request_raw` 错误都满足断言；`:82` 不校验 JSON-RPC envelope；`tests/cli.rs:43`、`:49` 负向测试接受信号/abort，且缺失路径可能真实存在。
 - [ ] **示例缺失路径**（补扫，中）：`examples/process_mgmt.js:10` worker 创建与 ack 无失败路径；`examples/ring.js:22` 超时只覆盖根 recv；`examples/timer.js:5` 两个 pid 未使用。
 - [ ] **e2e 时序假设与命名**（补扫，中）：`tests/e2e.rs:245`、`:283`、`:349`、`:537` 依赖 wall-clock 或后续动作；`:639`、`:752` 测试名与内容不符（未观察子进程的 sandbox）。
@@ -56,6 +56,9 @@
 - [ ] **已知权衡待注释**（补扫，低）：`src/scheduler.rs:475` 的 `recv(timeout)` 定时器不随消息取消（惰性删除，`CLAUDE.md` 已说明），需补 `shortcut:` 注释，说明何时改为可删除的堆。
 - [ ] `src/rpc.rs:164`：接受数组 `params`，但所有方法都不使用（低）。
 - [ ] `src/main.rs:66`：入口脚本先于 RPC 监听启动（待核实，设计取舍，低）。
+- [ ] `src/process.rs:175-191`：生命周期钩子（`__otter_done` / `__otter_error`）是用户代码可见的全局，脚本可伪造本进程终态或覆盖 resolver。影响仅限本进程自身，不构成提权（scan 标为高，此处判为中）。
+- [ ] `src/rpc.rs:176-182`：`shutdown` 先回包后置位关停标志，属预期顺序，仅记录（低）。
+- [ ] `src/main.rs:106`：端口为 0 时打印的是 `0`，应打印 `local_addr()`（低）。
 
 ## 修复记录
 
