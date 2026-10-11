@@ -279,6 +279,35 @@ fn rpc_malformed_json_returns_parse_error() {
 }
 
 #[test]
+fn rpc_invalid_request_returns_32600() {
+    let h = start_harness();
+    for raw in [
+        "[]",
+        "null",
+        "{}",
+        r#"{"jsonrpc":"2.0","method":7,"id":1}"#,
+        r#"{"jsonrpc":"2.0","method":"count","params":false,"id":1}"#,
+    ] {
+        let response = request_raw(h.port, raw, Duration::from_secs(5)).unwrap();
+        let value: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["error"]["code"], -32600, "raw request: {raw}");
+
+        let response = request_raw(
+            h.port,
+            r#"{"jsonrpc":"2.0","method":"count","id":true}"#,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["id"], Value::Null);
+        assert_eq!(value["error"]["code"], -32600);
+
+        assert_eq!(value["error"]["code"], -32600, "raw request: {raw}");
+    }
+    teardown(h);
+}
+
+#[test]
 fn rpc_missing_required_param_is_invalid_params() {
     let h = start_harness();
     // spawn with no `code` string.

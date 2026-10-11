@@ -33,6 +33,8 @@ const MAX_LINE: u64 = 1 << 20;
 /// cannot hold connection slots forever.
 const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Bound each response write so clients that stop reading cannot pin connection threads.
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Bind the control listener. `port == 0` asks the OS for an ephemeral port.
 pub fn bind(host: &str, port: u16) -> std::io::Result<TcpListener> {
     TcpListener::bind((host, port))
@@ -45,18 +47,31 @@ pub fn bind(host: &str, port: u16) -> std::io::Result<TcpListener> {
 /// serialized on the shared `World` locks, so per-connection threads remain
 /// race-free with the scheduler.
 pub fn serve_loop(listener: TcpListener, world: Arc<World>, shutdown: Arc<AtomicBool>) {
-    listener
-        .set_nonblocking(true)
-        .expect("failed to set nonblocking");
-    // Cap the number of live connection threads so a client cannot exhaust
-    // file descriptors / threads by opening unbounded connections.
+    if let Err(e) = listener.set_nonblocking(true) {
+        eprintln!("otter: failed to set RPC listener nonblocking: {e}");
+        return;
+    }
+    // Cap live connection threads so clients cannot exhaust server resources.
     let mut live: Vec<std::thread::JoinHandle<()>> = Vec::new();
+    let mut streams: Vec<TcpStream> = Vec::new();
     let max_conns = 256;
     loop {
-        // Reap finished connection threads so `live` stays a true count.
-        live.retain(|h| !h.is_finished());
+        let mut index = 0;
+        while index < live.len() {
+            if live[index].is_finished() {
+                let handle = live.swap_remove(index);
+                let _ = handle.join();
+                streams.swap_remove(index);
+            } else {
+                index += 1;
+            }
+        }
         if shutdown.load(Ordering::Relaxed) {
-            return;
+            for stream in &streams {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+
+            break;
         }
         if live.len() >= max_conns {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -64,30 +79,51 @@ pub fn serve_loop(listener: TcpListener, world: Arc<World>, shutdown: Arc<Atomic
         }
         match listener.accept() {
             Ok((stream, _addr)) => {
+                let monitor = match stream.try_clone() {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        eprintln!("otter: failed to monitor rpc connection: {e}");
+                        continue;
+                    }
+                };
                 let w = world.clone();
                 let s = shutdown.clone();
-                let handle = std::thread::Builder::new()
+                match std::thread::Builder::new()
                     .name("otter-rpc-conn".to_string())
                     .spawn(move || handle_conn(stream, &w, &s))
-                    .expect("failed to spawn rpc connection thread");
-                live.push(handle);
+                {
+                    Ok(handle) => {
+                        live.push(handle);
+                        streams.push(monitor);
+                    }
+                    Err(e) => eprintln!("otter: failed to spawn rpc connection thread: {e}"),
+                }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             Err(e) => {
                 eprintln!("otter: rpc accept error: {e}");
-                // Keep serving: one failed accept (such as EMFILE under load)
-                // must not stop the control server.
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
     }
+    for handle in live {
+        let _ = handle.join();
+    }
 }
 
 fn handle_conn(mut stream: TcpStream, world: &Arc<World>, shutdown: &Arc<AtomicBool>) {
-    let _ = stream.set_read_timeout(Some(IDLE_TIMEOUT));
-    let mut reader = BufReader::new(stream.try_clone().expect("dup stream"));
+    if stream.set_read_timeout(Some(IDLE_TIMEOUT)).is_err() {
+        return;
+    }
+    if stream.set_write_timeout(Some(WRITE_TIMEOUT)).is_err() {
+        return;
+    }
+    let Ok(reader_stream) = stream.try_clone() else {
+        return;
+    };
+    let mut reader = BufReader::new(reader_stream);
     let mut line = String::new();
     loop {
         line.clear();
@@ -98,14 +134,18 @@ fn handle_conn(mut stream: TcpStream, world: &Arc<World>, shutdown: &Arc<AtomicB
         }
         if !line.ends_with('\n') && line.len() as u64 >= MAX_LINE {
             let resp = json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32600, "message": "request too large" } });
-            let _ = write_all_json(&mut stream, &resp);
+            if write_all_json(&mut stream, &resp).is_err() {
+                return;
+            }
             return;
         }
         let req: Value = match serde_json::from_str(line.trim()) {
             Ok(v) => v,
             Err(e) => {
                 let resp = json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": format!("parse error: {e}") } });
-                let _ = write_all_json(&mut stream, &resp);
+                if write_all_json(&mut stream, &resp).is_err() {
+                    return;
+                }
                 continue;
             }
         };
@@ -114,13 +154,30 @@ fn handle_conn(mut stream: TcpStream, world: &Arc<World>, shutdown: &Arc<AtomicB
         // consume. (A malformed payload always draws an error, id or not.)
         let is_notification = req.get("id").is_none();
         let id = req.get("id").cloned().unwrap_or(Value::Null);
-        let method = req.get("method").and_then(Value::as_str).unwrap_or("");
-        let params = req.get("params").cloned().unwrap_or(json!({}));
+        let valid_id = id.is_null() || id.is_string() || id.is_number();
+        let method = req.get("method").and_then(Value::as_str);
+        let params = req.get("params");
+        let valid_request = req.is_object()
+            && req.get("jsonrpc").and_then(Value::as_str) == Some("2.0")
+            && method.is_some()
+            && valid_id
+            && params.is_none_or(|value| value.is_object() || value.is_array());
+        if !valid_request {
+            let error_id = if valid_id { id } else { Value::Null };
+            let response = json!({"jsonrpc":"2.0", "id": error_id, "error":{"code":-32600,"message":"Invalid Request"}});
+            if write_all_json(&mut stream, &response).is_err() {
+                return;
+            }
+            continue;
+        }
+        let method = method.unwrap();
+        let params = params.cloned().unwrap_or(json!({}));
         let resp = dispatch(method, &params, world, shutdown);
-        if !is_notification {
-            let _ = write_all_json(&mut stream, &resolve(id, resp));
+        if !is_notification && write_all_json(&mut stream, &resolve(id, resp)).is_err() {
+            return;
         }
         if method == "shutdown" {
+            shutdown.store(true, Ordering::Relaxed);
             return;
         }
     }
@@ -132,7 +189,7 @@ fn dispatch(
     method: &str,
     params: &Value,
     world: &Arc<World>,
-    shutdown: &Arc<AtomicBool>,
+    _shutdown: &Arc<AtomicBool>,
 ) -> Result<Value, Value> {
     match method {
         "list" => Ok(json!(
@@ -196,10 +253,7 @@ fn dispatch(
                 Ok(json!(false))
             }
         }
-        "shutdown" => {
-            shutdown.store(true, Ordering::Relaxed);
-            Ok(json!(true))
-        }
+        "shutdown" => Ok(json!(true)),
         _ => Err(json!({ "code": -32601, "message": format!("method not found: {method}") })),
     }
 }
@@ -214,5 +268,28 @@ fn resolve(id: Value, resp: Result<Value, Value>) -> Value {
 fn write_all_json(stream: &mut TcpStream, value: &Value) -> std::io::Result<()> {
     let mut buf = serde_json::to_vec(value)?;
     buf.push(b'\n');
-    stream.write_all(&buf)
+    let deadline = std::time::Instant::now() + WRITE_TIMEOUT;
+    let mut remaining = &buf[..];
+    while !remaining.is_empty() {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        stream.set_write_timeout(Some(deadline - now))?;
+        match stream.write(remaining) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(n) => remaining = &remaining[n..],
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                if std::time::Instant::now() >= deadline {
+                    return Err(e);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
