@@ -29,12 +29,52 @@ use crate::scheduler::World;
 /// connection is closed, so one client cannot make the server buffer without
 /// bound.
 const MAX_LINE: u64 = 1 << 20;
-/// A connection that sends nothing for this long is closed, so idle clients
-/// cannot hold connection slots forever.
-const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// Longest a single request line may take to arrive, end to end. It also
+/// bounds the idle gap between requests, so a client that stalls or trickles
+/// bytes is closed instead of holding a connection slot.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Bound each response write so clients that stop reading cannot pin connection threads.
 const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Socket reader that gives each request line one total time budget. A plain
+/// read timeout restarts on every byte, so a client trickling one byte per
+/// interval could hold a connection thread forever.
+pub struct DeadlineStream {
+    stream: TcpStream,
+    budget: std::time::Duration,
+    deadline: std::time::Instant,
+}
+
+impl DeadlineStream {
+    pub fn new(stream: TcpStream, budget: std::time::Duration) -> Self {
+        let deadline = std::time::Instant::now() + budget;
+        Self {
+            stream,
+            budget,
+            deadline,
+        }
+    }
+
+    /// Start a fresh budget for the next request line.
+    pub fn restart(&mut self) {
+        self.deadline = std::time::Instant::now() + self.budget;
+    }
+}
+
+impl Read for DeadlineStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let now = std::time::Instant::now();
+        if now >= self.deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "request deadline exceeded",
+            ));
+        }
+        self.stream.set_read_timeout(Some(self.deadline - now))?;
+        self.stream.read(buf)
+    }
+}
 /// Bind the control listener. `port == 0` asks the OS for an ephemeral port.
 pub fn bind(host: &str, port: u16) -> std::io::Result<TcpListener> {
     TcpListener::bind((host, port))
@@ -114,19 +154,17 @@ pub fn serve_loop(listener: TcpListener, world: Arc<World>, shutdown: Arc<Atomic
 }
 
 fn handle_conn(mut stream: TcpStream, world: &Arc<World>, shutdown: &Arc<AtomicBool>) {
-    if stream.set_read_timeout(Some(IDLE_TIMEOUT)).is_err() {
-        return;
-    }
     if stream.set_write_timeout(Some(WRITE_TIMEOUT)).is_err() {
         return;
     }
     let Ok(reader_stream) = stream.try_clone() else {
         return;
     };
-    let mut reader = BufReader::new(reader_stream);
+    let mut reader = BufReader::new(DeadlineStream::new(reader_stream, REQUEST_TIMEOUT));
     let mut line = String::new();
     loop {
         line.clear();
+        reader.get_mut().restart();
         match (&mut reader).take(MAX_LINE).read_line(&mut line) {
             Ok(0) => return, // client closed
             Ok(_) => {}

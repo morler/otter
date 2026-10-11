@@ -4,12 +4,13 @@
 //! Each test boots its own `World` + worker + RPC server on an ephemeral
 //! port, drives it with JSON-RPC requests, and tears everything down.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use otter_rt::rpc::DeadlineStream;
 use otter_rt::scheduler::{RunItem, World, worker_loop};
 use serde_json::{Value, json};
 
@@ -368,6 +369,67 @@ fn rpc_shutdown_stops_the_server() {
 
     let _ = h.world.queue_tx.send(RunItem::Stop);
     let _ = h.worker.join();
+}
+
+#[test]
+fn deadline_stream_closes_a_trickled_request_line() {
+    // Regression: a client that keeps sending bytes but never ends the line
+    // must not keep the read alive. Each byte arrives well inside any per-read
+    // timeout, so only the total budget can stop this.
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peer = std::thread::spawn(move || {
+        let mut c = TcpStream::connect(addr).unwrap();
+        // About 3 s of one byte every 30 ms, never a newline.
+        for _ in 0..100 {
+            if c.write_all(b"x").is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    });
+    let (server, _) = listener.accept().unwrap();
+    let mut reader = BufReader::new(DeadlineStream::new(server, Duration::from_millis(300)));
+    let mut line = String::new();
+    let started = Instant::now();
+    let err = (&mut reader)
+        .take(1 << 20)
+        .read_line(&mut line)
+        .expect_err("a trickled line must hit the request budget");
+    // Unix reports a socket read timeout as WouldBlock, Windows as TimedOut.
+    assert!(
+        matches!(
+            err.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ),
+        "unexpected error kind: {:?}",
+        err.kind()
+    );
+    // Returns near the 300 ms budget, well before the peer stops at about 3 s.
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "budget not enforced: read ran for {:?}",
+        started.elapsed()
+    );
+    drop(reader);
+    peer.join().unwrap();
+}
+
+#[test]
+fn deadline_stream_reads_a_prompt_line_within_budget() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let peer = std::thread::spawn(move || {
+        let mut c = TcpStream::connect(addr).unwrap();
+        c.write_all(b"{\"ok\":true}\n").unwrap();
+    });
+    let (server, _) = listener.accept().unwrap();
+    let mut reader = BufReader::new(DeadlineStream::new(server, Duration::from_secs(5)));
+    let mut line = String::new();
+    reader.get_mut().restart();
+    (&mut reader).take(1 << 20).read_line(&mut line).unwrap();
+    assert_eq!(line, "{\"ok\":true}\n");
+    peer.join().unwrap();
 }
 
 #[test]

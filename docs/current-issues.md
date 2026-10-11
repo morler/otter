@@ -26,7 +26,7 @@
 
 - [x] **spawn 权限快照过早**（安全，高，已核实 `src/process.rs:238-250`；已修复：修复前复现子进程绕过成功，修复后父进程被 PermissionError 拒绝；回归测试 `spawn_cannot_bypass_self_narrowing_in_opts_getter`）：`opts` 的 getter 能运行用户 JS 并收窄自身权限，随后仍按旧快照派生特权子进程。修法：解析 `opts` 之后重新读取并检查。
 - [x] **recv 持锁跨越 resolve**（中，已核实 `src/process.rs:287`；已修复：复现脚本修复前挂死（超时 124），修复后单 worker 下同 worker 进程仍可运行）：`match` 的守卫持有到分支结束；JSON 对象的 `then` getter 同步执行，可在守卫内重入 `recv` 导致 worker 死锁，殃及同 worker 的其他进程。修法：先取出结果、释放守卫，再 resolve。
-- [ ] **RPC 慢速客户端占线程**（高，已核实 `src/rpc.rs:130`）：`read_timeout` 按单次读计，客户端每 59 秒送 1 字节即可长期占线程。修法：为整行读取设总截止时间。
+- [x] **RPC 慢速客户端占线程**（高，已核实 `src/rpc.rs:130`；已修复：新增 `DeadlineStream`，每行共享 60 秒总期限。修复前每 40 秒送 1 字节的客户端在约 100 秒时仍保持连接，修复后超过 60 秒即关闭。回归测试 `deadline_stream_closes_a_trickled_request_line`、`deadline_stream_reads_a_prompt_line_within_budget`）。注意：同时在线的 256 个连接仍可各自每 59 秒完成一个请求而占满上限，这需要按连接限流或鉴权，尚未处理。
 - [x] **RPC 绑定失败仍以 0 退出**（中，已核实 `src/main.rs:115-119`；已修复：占用端口时退出码由 0 变为 1）：绑定失败只打印，进程按“未请求 RPC”继续。修法：绑定失败时以退出码 1 结束。
 - [x] **单个 job 无中断（已实现可选上限）**：`--max-job-ms MS`，默认关闭。超限即让进程失败；实测 `try/catch` 无法捕获该中断。`tests/e2e.rs::job_over_budget_fails_the_process` 覆盖 `run_slice` 路径；创建时入口脚本路径仅手测（无自动化测试）。
 - [ ] **ERROR_DESCRIBER 可抛错**（高，结构确认，未实测，`src/process.rs:152-155`）：`String(e)` 或 `e.stack` 抛错时 `__otter_error` 不会被调用，进程可能停在非终态。修法：描述函数包 try/catch，兜底返回固定文本。
