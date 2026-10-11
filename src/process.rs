@@ -278,11 +278,10 @@ fn install_messaging<'js>(
                         "spawn is not permitted in this sandbox",
                     ));
                 }
-                // Child sandbox: inherit the parent, narrowed by any explicit
-                // override. Absent keys inherit; `true` is a no-op intersect;
-                // only `false` narrows. No escalation is possible: the child can
-                // never hold a toggle the parent lacks.
-                let mut child = parent;
+                // The opts getters run user JS, which can narrow this process's
+                // own sandbox. Record the request, then read the sandbox again
+                // after them, so the child never derives from a stale snapshot.
+                let mut narrow = false;
                 if let Some(opts_v) = opts.0
                     && let Some(opts_obj) = opts_v.as_object()
                 {
@@ -291,10 +290,20 @@ fn install_messaging<'js>(
                         && let Some(sb_obj) = sb_v.as_object()
                     {
                         let csk: Option<bool> = sb_obj.get("canSpawnAndKill")?;
-                        if let Some(false) = csk {
-                            child.can_spawn_and_kill = false;
-                        }
+                        narrow = matches!(csk, Some(false));
                     }
+                }
+                // Child inherits the fresh sandbox; only an explicit `false`
+                // narrows it. No escalation is possible.
+                let mut child = *s.sandbox.lock().unwrap();
+                if !child.can_spawn_and_kill {
+                    return Err(permission_error(
+                        &cx,
+                        "spawn is not permitted in this sandbox",
+                    ));
+                }
+                if narrow {
+                    child.can_spawn_and_kill = false;
                 }
                 scheduler::spawn_process(&w, "<spawned>", &code, child)
                     .map_err(|msg| js_type_error(&cx, &msg))

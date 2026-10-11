@@ -521,6 +521,32 @@ fn restrictsandbox_self_narrows_irrevocably() {
 }
 
 #[test]
+fn spawn_cannot_bypass_self_narrowing_in_opts_getter() {
+    // The opts getter narrows this process mid-call. The child must not
+    // inherit the pre-getter snapshot, so spawn is denied and nothing runs.
+    run_script(
+        "root.js",
+        r#"
+            const opts = {
+                get sandbox() {
+                    restrictSandbox({ canSpawnAndKill: false });
+                    return {};
+                },
+            };
+            try {
+                spawn("throw new Error('child must not run');", opts);
+                throw new Error("spawn after self-narrowing should throw");
+            } catch (e) {
+                if (!(e instanceof PermissionError)) {
+                    throw new Error("expected PermissionError, got: " + e);
+                }
+            }
+        "#,
+        Sandbox::PRIVILEGED,
+    );
+}
+
+#[test]
 fn restrictsandbox_cross_target_requires_privilege_and_narrows() {
     run_script(
         "root.js",
