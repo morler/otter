@@ -21,17 +21,38 @@ fn wait_for_completion(world: &Arc<World>, timeout: Duration) {
     assert_eq!(world.failed.load(std::sync::atomic::Ordering::Relaxed), 0);
 }
 
+/// Stops and joins its worker on drop, so a failing assertion still shuts the
+/// worker down before the test unwinds.
+struct WorkerGuard {
+    world: Arc<World>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl WorkerGuard {
+    fn start(world: &Arc<World>) -> Self {
+        let w = world.clone();
+        Self {
+            world: world.clone(),
+            handle: Some(std::thread::spawn(move || worker_loop(w))),
+        }
+    }
+}
+
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        let _ = self.world.queue_tx.send(RunItem::Stop);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Run one script on a single worker until every process finishes.
 fn run_script(name: &str, source: &str, sandbox: Sandbox) {
     let world = World::new();
-    let worker = {
-        let w = world.clone();
-        std::thread::spawn(move || worker_loop(w))
-    };
+    let _worker = WorkerGuard::start(&world);
     spawn_process(&world, name, source, sandbox).unwrap();
     wait_for_completion(&world, Duration::from_secs(10));
-    let _ = world.queue_tx.send(RunItem::Stop);
-    worker.join().unwrap();
 }
 
 #[test]

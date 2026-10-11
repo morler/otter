@@ -2,18 +2,39 @@
 
 use std::process::{Command, Output};
 
+/// Owns a fresh, uniquely named directory and removes it on drop, so a failing
+/// assertion does not leave test artifacts behind.
+struct ScratchDir(std::path::PathBuf);
+
+impl ScratchDir {
+    fn new(test: &str) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("otter-cli-{}-{nanos}-{test}", std::process::id()));
+        // create_dir (not create_dir_all) fails if a path collision already exists.
+        std::fs::create_dir(&dir).unwrap();
+        Self(dir)
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Write `source` to a fresh script named after `test` and run otter on it.
 fn run_otter(test: &str, source: &str) -> Output {
-    let dir = std::env::temp_dir().join(format!("otter-cli-{}-{test}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let script = dir.join("script.js");
+    let dir = ScratchDir::new(test);
+    let script = dir.0.join("script.js");
     std::fs::write(&script, source).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_otter"))
+    Command::new(env!("CARGO_BIN_EXE_otter"))
         .arg(&script)
         .output()
-        .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
-    out
+        .unwrap()
 }
 
 #[test]
@@ -41,5 +62,8 @@ fn console_error_writes_to_stderr_not_stdout() {
         stdout.contains("ok") && !stdout.contains("boom"),
         "stdout: {stdout}"
     );
-    assert!(stderr.contains("boom"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("boom") && !stderr.contains("ok"),
+        "stderr: {stderr}"
+    );
 }

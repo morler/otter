@@ -75,7 +75,10 @@ fn request_rpc(port: u16, method: &str, params: Value) -> Value {
 
     let mut reader = BufReader::new(sock.try_clone().unwrap());
     let mut line = String::new();
-    let _ = reader.read_line(&mut line).unwrap();
+    assert!(
+        reader.read_line(&mut line).unwrap() > 0,
+        "server closed the connection without a response"
+    );
     serde_json::from_str::<Value>(&line).unwrap()
 }
 
@@ -89,9 +92,12 @@ fn request_raw(port: u16, raw: &str, timeout: Duration) -> std::io::Result<Strin
     sock.write_all(payload.as_bytes())?;
     let mut reader = BufReader::new(sock.try_clone().unwrap());
     let mut line = String::new();
-    match reader.read_line(&mut line) {
-        Ok(_) => Ok(line.to_owned()),
-        Err(e) => Err(e),
+    match reader.read_line(&mut line)? {
+        0 => Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "server closed the connection without a response",
+        )),
+        _ => Ok(line),
     }
 }
 
@@ -327,7 +333,17 @@ fn rpc_notification_gets_no_response() {
         r#"{"jsonrpc":"2.0","method":"count"}"#,
         Duration::from_millis(300),
     );
-    assert!(resp.is_err(), "notification must not produce a response");
+    // Only a read timeout counts as silence; EOF or a payload is a failure.
+    let kind = resp
+        .expect_err("notification must not produce a response")
+        .kind();
+    assert!(
+        matches!(
+            kind,
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ),
+        "expected a read timeout (silence), got {kind:?}"
+    );
     teardown(h);
 }
 
@@ -365,9 +381,8 @@ fn rpc_idle_client_does_not_block_other_clients() {
 
     // A stuck client: connect and never send a line. Its connection thread
     // blocks in read() waiting for input that never arrives.
-    let _stuck =
-        std::net::TcpStream::connect(SocketAddr::new("127.0.0.1".parse().unwrap(), h.port))
-            .expect("stuck client connect");
+    let stuck = std::net::TcpStream::connect(SocketAddr::new("127.0.0.1".parse().unwrap(), h.port))
+        .expect("stuck client connect");
 
     // A second client should still be served promptly rather than queued
     // behind the stuck one.
@@ -379,6 +394,8 @@ fn rpc_idle_client_does_not_block_other_clients() {
     );
     assert_eq!(resp.get("result").unwrap().as_u64().unwrap(), 0);
 
+    // Close the idle client before teardown so its connection thread can exit.
+    drop(stuck);
     teardown(h);
 }
 
